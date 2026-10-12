@@ -1,0 +1,7 @@
+# Keep line endings stable so content hashes, patches and audit logs are
+# reproducible across Windows and Linux checkouts.
+* text=auto eol=lf
+*.patch text eol=lf
+*.jsonl text eol=lf
+*.sql text eol=lf
+*.png binary

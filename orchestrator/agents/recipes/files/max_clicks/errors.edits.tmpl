@@ -1,0 +1,17 @@
+@@# Anchored edit of shortener/domain/errors.py (domain-api group).
+
+@@@ edit invalid-click-limit
+@@@ anchor
+class InvalidExpiryError(InvalidInputError):
+    code = "invalid_expiry"
+    default_message = "The expiry is not acceptable."
+@@@ replace
+class InvalidExpiryError(InvalidInputError):
+    code = "invalid_expiry"
+    default_message = "The expiry is not acceptable."
+
+
+class InvalidClickLimitError(InvalidInputError):
+    code = "invalid_click_limit"
+    default_message = "The click limit is not acceptable."
+@@@ end

@@ -1,0 +1,287 @@
+"""Tests for linkcheck.checker and linkcheck.fetcher: fake fetcher, fake clock, no network."""
+
+from __future__ import annotations
+
+@@IMPORTS@@
+
+PUBLIC = ["93.184.216.34"]
+
+
+class FakeFetcher:
+    """Replays scripted outcomes (a status, a (status, location) pair or an exception)."""
+
+    def __init__(self, *outcomes):
+        self.outcomes = list(outcomes)
+        self.requests = []
+
+    def fetch(self, request):
+        self.requests.append(request)
+        outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
+        if isinstance(outcome, Exception):
+            raise outcome
+        status, location = outcome if isinstance(outcome, tuple) else (outcome, None)
+        return FetchResponse(status, location)
+
+
+def make(*outcomes, **settings):
+    """A checker over a FakeFetcher, a public resolver and a sleep that records the delays."""
+    fetcher = FakeFetcher(*outcomes)
+    sleeps: list[float] = []
+    checker = LinkChecker(
+        fetcher, settings=Settings(**settings), resolver=lambda host: PUBLIC, sleep=sleeps.append
+    )
+    return checker, fetcher, sleeps
+
+
+class FakeSocket:
+    """Replays response chunks; every recv moves the fake clock forward by ``step`` seconds."""
+
+    def __init__(self, chunks, now=None, step=0.0):
+        self.chunks, self.now, self.step, self.sent = list(chunks), now, step, b""
+
+    def settimeout(self, seconds):
+        pass
+
+    def sendall(self, data):
+        self.sent += data
+
+    def recv(self, size):
+        if self.now is not None:
+            self.now[0] += self.step
+        return self.chunks.pop(0) if self.chunks else b""
+
+    def close(self):
+        pass
+
+
+def request(**changes):
+    base = FetchRequest("http://example.org/", "http", "example.org", 80, "/", tuple(PUBLIC), 5.0)
+    return dataclasses.replace(base, **changes)
+
+
+def connecting(sock, log=None):
+    """A ``connect`` callable that hands out ``sock`` and records the address it was asked for."""
+
+    def connect(address, timeout):
+        if log is not None:
+            log.append(address)
+        return sock
+
+    return connect
+
+
+# @@ASPECT classification@@
+def test_each_status_class_maps_to_exactly_one_classification():
+    """2xx is healthy, 3xx redirecting, 4xx client_error and 5xx server_error.
+
+    @@COVERS@@
+    """
+    table = {
+        200: "healthy",
+        204: "healthy",
+        301: "redirecting",
+        404: "client_error",
+        410: "client_error",
+        500: "server_error",
+        503: "server_error",
+        700: "server_error",
+    }
+    for status, expected in table.items():
+        checker, _, _ = make(status, max_retries=0)
+        result = checker.check("https://example.org/")
+        assert (result.classification, result.status_code) == (expected, status), status
+
+
+def test_a_redirect_is_reported_and_never_followed():
+    """The Location header is reported; the private target it names is never contacted.
+
+    @@COVERS@@
+    """
+    checker, fetcher, _ = make((302, "http://127.0.0.1/admin"))
+    result = checker.check("https://example.org/")
+    assert (result.classification, result.location) == ("redirecting", "http://127.0.0.1/admin")
+    assert len(fetcher.requests) == 1
+
+
+def test_transport_and_dns_failures_are_classified():
+    """A failed connection is a server_error, a name that does not resolve is a client_error.
+
+    @@COVERS@@
+    """
+    checker, _, _ = make(FetchError("connection_failed"), max_retries=0)
+    assert checker.check("https://example.org/").classification == "server_error"
+
+    def unresolvable(host):
+        raise ResolutionError("no such host")
+
+    lost = LinkChecker(FakeFetcher(200), resolver=unresolvable)
+    assert lost.check("https://nowhere.example/").classification == "client_error"
+
+
+def test_default_fetcher_reads_the_status_and_follows_no_redirect():
+    """HttpFetcher makes exactly one request to the pinned address and reports the Location.
+
+    @@COVERS@@
+    """
+    sock = FakeSocket([b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/admin\r\n\r\n<html>"])
+    connects: list[tuple[str, int]] = []
+    response = HttpFetcher(connect=connecting(sock, connects)).fetch(request())
+    assert response == FetchResponse(302, "http://127.0.0.1/admin")
+    assert connects == [("93.184.216.34", 80)]
+    assert sock.sent.startswith(b"GET / HTTP/1.1\r\nHost: example.org\r\n")
+    assert b"Cookie" not in sock.sent and b"Authorization" not in sock.sent
+
+
+# @@ASPECT timeout@@
+def test_the_time_budget_defaults_to_the_requirement_and_reaches_the_fetcher():
+    """One attempt gets @@TIMEOUT_SECONDS@@ seconds; a timeout is classified as timeout.
+
+    @@COVERS@@
+    """
+    assert Settings().timeout_seconds == @@TIMEOUT_SECONDS@@
+    checker, fetcher, _ = make(FetchTimeout(), max_retries=0)
+    result = checker.check("https://example.org/")
+    assert fetcher.requests[0].timeout_seconds == @@TIMEOUT_SECONDS@@
+    assert (result.classification, result.reason) == ("timeout", "timeout")
+
+
+def test_settings_reject_out_of_range_values():
+    """A time budget outside 1..60 seconds, or not a number, fails loudly.
+
+    @@COVERS@@
+    """
+    for bad in (0, 61, -5, float("nan"), float("inf"), True, "5"):
+        with pytest.raises(ValueError):
+            make(200, timeout_seconds=bad)
+
+
+def test_default_fetcher_enforces_a_total_deadline():
+    """A server that trickles bytes cannot keep one attempt alive past its time budget.
+
+    @@COVERS@@
+    """
+    now = [0.0]
+    sock = FakeSocket([b"H"] * 100, now=now, step=2.0)
+    fetcher = HttpFetcher(connect=connecting(sock), clock=lambda: now[0])
+    with pytest.raises(FetchTimeout):
+        fetcher.fetch(request(timeout_seconds=5.0))
+    assert len(sock.chunks) > 90  # gave up after a handful of reads
+
+
+def test_name_resolution_is_bounded_by_the_time_budget(monkeypatch):
+    """A lookup that never returns is abandoned after the budget; failures are not timeouts.
+
+    @@COVERS@@
+    """
+    release = threading.Event()
+
+    def getaddrinfo(host, *args, **kwargs):
+        if host == "stuck.example":
+            release.wait(5)
+        if host == "ok.example":
+            return [(0, 0, 0, "", ("93.184.216.34", 0))]
+        raise socket.gaierror("no such host")
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    assert system_resolver("ok.example", 1.0) == ["93.184.216.34"]
+    with pytest.raises(ResolutionError) as lost:
+        system_resolver("nowhere.example", 1.0)
+    assert not isinstance(lost.value, ResolutionTimeout)
+    with pytest.raises(ResolutionTimeout):
+        system_resolver("stuck.example", 0.05)
+    release.set()
+
+
+# @@ASPECT ssrf-block@@
+def test_the_fetcher_connects_only_to_pinned_addresses_and_checks_the_host_name():
+    """HTTPS connects to the validated address and verifies the certificate for the host name.
+
+    @@COVERS@@
+    """
+    names = []
+
+    class Context:
+        def wrap_socket(self, sock, server_hostname):
+            names.append(server_hostname)
+            return sock
+
+    sock = FakeSocket([b"HTTP/1.1 200 OK\r\n\r\n"])
+    connects: list[tuple[str, int]] = []
+    fetcher = HttpFetcher(connect=connecting(sock, connects), tls=Context())
+    addresses = ("93.184.216.34", "2606:4700:4700::1111")
+    response = fetcher.fetch(request(scheme="https", port=443, addresses=addresses))
+    assert response.status == 200 and names == ["example.org"]
+    assert connects == [("93.184.216.34", 443)]  # one connection, to a vetted address
+    assert sock.sent.startswith(b"GET / HTTP/1.1\r\nHost: example.org\r\n")
+
+
+def test_the_fetcher_refuses_requests_that_could_inject_headers():
+    """A target, host or scheme that is not plain text never reaches a socket.
+
+    @@COVERS@@
+    """
+    connects: list[tuple[str, int]] = []
+    fetcher = HttpFetcher(connect=connecting(FakeSocket([]), connects))
+    for bad in ({"target": "/ HTTP/1.1\r\nX: y"}, {"host": "example.org\r\nX: y"}, {"scheme": "x"}):
+        with pytest.raises(FetchError):
+            fetcher.fetch(request(**bad))
+    assert connects == []
+
+
+# @@ASPECT retry@@
+def test_transient_failures_are_retried_with_exponential_backoff():
+    """A 503, then a 500, then a 200: two retries, waiting the base delay and twice that.
+
+    @@COVERS@@
+    """
+    checker, fetcher, sleeps = make(503, 500, 200, max_retries=3)
+    result = checker.check("https://example.org/")
+    assert (result.classification, result.attempts) == ("healthy", 3)
+    assert sleeps == [@@BACKOFF_BASE_SECONDS@@, 2 * @@BACKOFF_BASE_SECONDS@@]
+    assert len(fetcher.requests) == 3
+
+
+def test_retries_stop_at_the_configured_maximum():
+    """A destination that keeps timing out is tried max_retries + 1 times with doubling delays.
+
+    @@COVERS@@
+    """
+    checker, _, sleeps = make(FetchTimeout())
+    result = checker.check("https://example.org/")
+    assert Settings().max_retries == @@MAX_RETRIES@@
+    assert (result.classification, result.attempts) == ("timeout", @@MAX_RETRIES@@ + 1)
+    assert sleeps == [@@BACKOFF_BASE_SECONDS@@ * 2**i for i in range(@@MAX_RETRIES@@)]
+
+
+def test_permanent_outcomes_are_never_retried():
+    """Client errors, redirects, healthy answers and blocked destinations are final.
+
+    @@COVERS@@
+    """
+    for outcome in (404, 301, 200):
+        checker, fetcher, sleeps = make(outcome)
+        assert checker.check("https://example.org/").attempts == 1
+        assert sleeps == [] and len(fetcher.requests) == 1
+    checker, fetcher, sleeps = make(200)
+    assert checker.check("http://127.0.0.1/").attempts == 1
+    assert sleeps == [] and fetcher.requests == []
+
+
+# @@ASPECT offline-testable@@
+def test_the_library_needs_no_network_or_server(monkeypatch):
+    """With every socket primitive disabled, checking, retrying and blocking still work.
+
+    @@COVERS@@
+    """
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("network access attempted")
+
+    for name in ("getaddrinfo", "create_connection", "gethostbyname"):
+        monkeypatch.setattr(socket, name, forbidden)
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    LinkChecker()  # the default fetcher and resolver are only built, never used
+    checker, fetcher, sleeps = make(503, 200, max_retries=1)
+    urls = ["https://example.org/a", "http://127.0.0.1/", "ftp://example.org/"]
+    assert [r.classification for r in checker.check_many(urls)] == ["healthy", "blocked", "blocked"]
+    assert len(fetcher.requests) == 2 and len(sleeps) == 1

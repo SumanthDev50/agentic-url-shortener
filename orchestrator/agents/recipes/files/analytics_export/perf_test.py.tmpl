@@ -1,0 +1,74 @@
+"""Benchmark: the CSV export stays within its latency budget (in-process, deterministic data).
+
+The requirement is "the export responds within @@PERF_BUDGET_MS@@ ms (p95)".  That target is for the
+deployed service.  This benchmark measures the application work only (routing, authentication, the
+SQLite queries and the CSV encoding) through the in-process test client, on a migrated SQLite
+file holding a full window of clicks, so it asserts a deliberately generous budget of
+@@IN_PROCESS_BUDGET_MS@@ ms (four times the target, never below 500 ms).  It catches algorithmic regressions
+(per-row queries, quadratic encoding) without flaking on a busy CI machine.  Network latency and
+production data volumes need a load test of the deployed service, which this suite does not do.
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from datetime import timedelta
+
+from shortener.domain.models import ClickEvent
+from shortener.services import analytics_service
+from shortener.storage.click_repository import SqliteClickRepository
+from tests.shortener.conftest import SharedApp
+
+IN_PROCESS_BUDGET_MS = @@IN_PROCESS_BUDGET_MS@@
+WARMUP_REQUESTS = 3
+MEASURED_REQUESTS = 20
+CLICKS_PER_DAY = 20
+REFERRERS = ("https://a.example", "https://b.example", "https://c.example")
+
+
+def p95(samples_ms: list[float]) -> float:
+    ordered = sorted(samples_ms)
+    return ordered[math.ceil(0.95 * len(ordered)) - 1]
+
+
+def test_full_window_export_meets_the_latency_budget(shared: SharedApp) -> None:
+    """The p95 of a full-window export stays within the in-process budget.
+
+    Covers: @@COVERS@@
+    """
+    created = shared.client.post(
+        "/api/v1/links", json={"url": "https://example.com/benchmark"}, headers=shared.alice
+    )
+    code = created.json()["code"]
+    link = shared.services.links.get(code, "alice")
+    now = shared.services.clock.now()
+    window = analytics_service.EXPORT_MAX_DAYS
+    SqliteClickRepository(shared.services.database).insert_many(
+        [
+            ClickEvent(
+                link.id,
+                now - timedelta(days=day),
+                REFERRERS[n % len(REFERRERS)],
+                "Chrome",
+                "desktop",
+                f"visitor-{day}-{n}",
+            )
+            for day in range(window)
+            for n in range(CLICKS_PER_DAY)
+        ]
+    )
+    url = f"/api/v1/links/{code}/analytics/export.csv"
+    samples: list[float] = []
+    for attempt in range(WARMUP_REQUESTS + MEASURED_REQUESTS):
+        started = time.perf_counter()
+        response = shared.client.get(url, params={"days": window}, headers=shared.alice)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        assert response.status_code == 200
+        assert response.text.count("\r\n") == window + 1
+        if attempt >= WARMUP_REQUESTS:
+            samples.append(elapsed_ms)
+    measured = p95(samples)
+    assert measured <= IN_PROCESS_BUDGET_MS, (
+        f"p95 {measured:.1f} ms exceeds the {IN_PROCESS_BUDGET_MS} ms in-process budget"
+    )

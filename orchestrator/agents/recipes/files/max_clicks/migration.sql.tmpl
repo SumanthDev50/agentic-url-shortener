@@ -1,0 +1,9 @@
+-- @@MIGRATION_STEM@@: optional per-link click limit (max_clicks).
+-- Forward-only and additive: one nullable column, so existing rows and existing code paths are
+-- untouched. NULL means "unlimited". A limited link stops redirecting once click_count reaches
+-- max_clicks; LinkRepository.consume_click enforces that with one atomic conditional UPDATE.
+-- The upper bound (@@MAX_VALUE_PLAIN@@) is validated by the API and the domain only, because
+-- SQLite cannot alter a CHECK constraint later. Applied migrations are immutable: undoing this
+-- change is a forward fix (see docs/features/max-clicks.md), never an edit of this file.
+
+ALTER TABLE links ADD COLUMN max_clicks INTEGER CHECK (max_clicks IS NULL OR max_clicks >= @@MIN_VALUE_PLAIN@@);

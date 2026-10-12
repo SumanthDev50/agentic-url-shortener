@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "name": "brownfield",
+  "title": "Click limit for short links (enhancement with a schema migration)",
+  "kind": "brownfield",
+  "request_file": "request.md",
+  "baseline": {
+    "source": "repo",
+    "include": [
+      "shortener/**",
+      "tests/__init__.py",
+      "tests/shortener/**",
+      "docs/api.md",
+      "docs/product-notes.md",
+      "pyproject.toml"
+    ],
+    "exclude": []
+  },
+  "params": {},
+  "workflow": {
+    "autonomy_mode": "guided",
+    "max_parallel": 4,
+    "promote": "bundle"
+  },
+  "faults": [
+    {
+      "node": "implement.*",
+      "fault": "migration_edit",
+      "attempts": 99
+    }
+  ],
+  "script": [
+    {
+      "on": "run.waiting",
+      "do": "approve",
+      "request": {
+        "node": "integrate"
+      },
+      "by": [
+        "alice",
+        "bob"
+      ],
+      "comment": "reviewed the integrated change set and accept the change-size budget waiver (CHG-002)"
+    },
+    {
+      "on": "run.waiting",
+      "do": "approve",
+      "request": {
+        "node": "design"
+      },
+      "by": [
+        "alice",
+        "bob"
+      ],
+      "comment": "migration plan and atomic-update ADR reviewed"
+    },
+    {
+      "on": "run.waiting",
+      "do": "approve",
+      "request": {
+        "node": "implement.*"
+      },
+      "by": [
+        "alice",
+        "bob"
+      ],
+      "comment": "change set reviewed (new migration only; no applied migration modified)"
+    },
+    {
+      "on": "run.waiting",
+      "do": "approve",
+      "request": {
+        "node": "release-readiness"
+      },
+      "by": [
+        "alice",
+        "bob"
+      ],
+      "comment": "go for release"
+    }
+  ],
+  "expect": {
+    "run_status": "succeeded",
+    "node_statuses": {
+      "codebase-analysis": "succeeded",
+      "verify": "succeeded",
+      "release-verify": "succeeded"
+    },
+    "node_status_patterns": {
+      "implement.*": "succeeded"
+    },
+    "events_present": [
+      "policy.violation",
+      "node.fallback_activated",
+      "approval.granted",
+      "node.succeeded"
+    ],
+    "events_absent": [
+      "run.safe_stopped"
+    ],
+    "decision_kinds": [
+      "fallback",
+      "approval",
+      "design"
+    ],
+    "min_parallel_width": 2,
+    "artifacts_present": [
+      "impact_report",
+      "design_doc",
+      "release_patch",
+      "readiness_report",
+      "traceability_matrix"
+    ],
+    "files_in_patch": [
+      "shortener/storage/migrations/003_add_max_clicks.sql"
+    ],
+    "blocking_questions": 0
+  }
+}

@@ -1,0 +1,86 @@
+# linkcheck: destination health checker
+
+`linkcheck/` verifies that the destinations behind short links still respond and classifies every
+result. It is a standalone library (standard library only): it needs no running server, and every
+network and DNS access is injectable, so it is fully unit-testable without network access.
+
+## Usage
+
+```python
+from linkcheck import LinkChecker, summarize
+
+results = LinkChecker().check_many(["https://example.org/", "http://127.0.0.1/admin"])
+print(summarize(results).render())
+```
+
+`LinkChecker.check(url)` returns a `CheckResult` (`url`, `classification`, `status_code`,
+`attempts`, `reason`, `location`) and never raises for a bad URL or an unreachable host.
+`summarize(results)` returns a `Report` with the number of links per classification and the list
+of unhealthy links (`render()` for text, `to_dict()` for JSON).
+
+## Classification
+
+| classification | meaning |
+|---|---|
+| `healthy` | 2xx response |
+| `redirecting` | 3xx response; the `Location` is reported and never followed |
+| `client_error` | 4xx response, or a host name that does not resolve |
+| `server_error` | 5xx response, or a transport failure (refused, reset, TLS failure) |
+| `timeout` | the time budget of an attempt ran out |
+| `blocked` | refused by the safety policy (non-http(s) scheme, private destination, bad URL) |
+
+`client_error`, `server_error`, `timeout` and `blocked` are *unhealthy*. `redirecting` is counted
+but not listed as unhealthy: the destination still answers (an assumption of this module).
+
+## Time budget and retries
+
+* One attempt has a **total** deadline of **@@TIMEOUT_SECONDS@@ seconds** (connect, TLS and
+  response head), not a per-read timeout. Valid range: 1 to 60 seconds.
+* Timeouts and 5xx responses are **transient** and retried up to **@@MAX_RETRIES@@ times**
+  (range 0 to 5) with exponential back-off: @@BACKOFF_SCHEDULE@@. Every other outcome is final.
+* Configure with `Settings(timeout_seconds=..., max_retries=..., backoff_base_seconds=...)`;
+  values outside the ranges raise `ValueError`.
+
+## Safety policy
+
+* Only `http` and `https` are accepted; credentials in a URL are refused.
+* A destination that is, or resolves to, a loopback, private, link-local, shared (CGNAT),
+  reserved, multicast or unspecified address is `blocked` and never contacted. IP literals are
+  recognised in every spelling (dotted, decimal, hex, octal, short forms, IPv6, IPv4-mapped IPv6).
+  A name is blocked when ANY of its DNS answers is non-public.
+* The vetted addresses are pinned: the fetcher connects to exactly those and never resolves the
+  name again (no DNS rebinding). HTTPS verifies the certificate against the original host name.
+* Redirects are never followed, proxy environment variables are ignored and no cookies or
+  credentials are sent. The response body is never read.
+* Untrusted text in reports (URLs, reasons) is sanitised so it cannot forge report lines.
+
+## Testing offline
+
+`LinkChecker(fetcher, settings=..., resolver=..., sleep=...)` takes every side effect as an
+argument: a `Fetcher` (one method, `fetch(FetchRequest) -> FetchResponse`), a resolver
+(`host -> [addresses]`) and a `sleep` function. `tests/linkcheck/` uses fakes for all three.
+
+## Design decisions
+
+@@DECISIONS@@
+
+## Acceptance criteria
+
+@@CRITERIA@@
+
+## Limitations
+
+* HTTP/1.1 over plain sockets; no HTTP/2, no proxy support (inject your own `Fetcher` if needed).
+* Health is status-based: a 200 response with an error page is `healthy`.
+* The system resolver cannot be interrupted; a lookup that exceeds the budget is abandoned in a
+  daemon thread. `check_many` is sequential (the checker holds no state, so it may be shared
+  between threads).
+* NAT64, 6to4 and Teredo addresses are refused as a whole.
+* Any TCP port of a public address may be checked: there is no port allow-list.
+* Only `linkcheck/fetcher.py` imports `socket`: a policy that restricts network libraries per
+  module must allow-list that file.
+
+## Rollback
+
+Delete `linkcheck/`, `tests/linkcheck/` and this page and revert the CHANGELOG entry. Nothing else
+imports the package and no data is created or migrated.

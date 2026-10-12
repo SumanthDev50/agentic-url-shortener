@@ -1,0 +1,21 @@
+### `GET /api/v1/links/{code}/analytics/export.csv`
+
+**Export daily click counts as CSV**
+
+A CSV attachment with one row per UTC calendar day of the last N days (today included, zero-filled): `code`, `date`, `clicks` and the day's most frequent referrer. N is at most @@MAX_WINDOW_DAYS@@. Text cells that a spreadsheet could read as a formula are prefixed with a single quote. Clicks are recorded asynchronously, so very recent clicks may not be visible yet.
+
+Authentication: `X-API-Key` header
+
+| Parameter | In | Type | Required | Description |
+|---|---|---|---|---|
+| `code` | path | `string` | yes |  |
+| `days` | query | `integer` | no | Window length in UTC calendar days, today included. Constraints: `minimum=1, maximum=@@MAX_WINDOW_DAYS@@`. |
+
+| Status | Description | Body |
+|---|---|---|
+| 200 | The CSV attachment. | - |
+| 401 | Missing or invalid API key. | `ErrorResponse` (application/json) |
+| 404 | Not found (also returned for links owned by another key). | `ErrorResponse` (application/json) |
+| 422 | Validation failed. | `ErrorResponse` (application/json) |
+| 429 | Rate limit exceeded; see Retry-After and X-RateLimit-* headers. | `ErrorResponse` (application/json) |
+

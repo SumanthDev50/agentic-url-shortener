@@ -1,0 +1,87 @@
+"""Tests for the CSV export of daily click counts (GET /api/v1/links/{code}/analytics/export.csv).
+
+Generated from the acceptance criteria of the ``analytics_export`` capability: every test names
+the requirement and criteria it covers.  Click rows are written straight through the repository,
+so the tests control the day, the count and (hostile) referrer values exactly.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+from datetime import timedelta
+from typing import Any
+
+import pytest
+
+from shortener.domain.models import ClickEvent
+from shortener.services import analytics_service, csv_export
+from shortener.storage.click_repository import SqliteClickRepository
+from tests.shortener.conftest import SharedApp
+
+EXPORT_PATH = "/api/v1/links/{code}/analytics/export.csv"
+HEADER_ROW = list(csv_export.HEADER)
+
+
+def make_link(shared: SharedApp, alias: str | None = None) -> str:
+    body = {"url": "https://example.com/landing"}
+    if alias is not None:
+        body["alias"] = alias
+    response = shared.client.post("/api/v1/links", json=body, headers=shared.alice)
+    assert response.status_code == 201, response.text
+    return str(response.json()["code"])
+
+
+needs_two_days = pytest.mark.skipif(
+    analytics_service.EXPORT_MAX_DAYS < 2, reason="a one-day window cannot show another day"
+)
+
+
+def window(days: int) -> int:
+    """``days`` limited to the configured maximum, so the tests hold for any maximum."""
+    return min(days, analytics_service.EXPORT_MAX_DAYS)
+
+
+def today_of(shared: SharedApp) -> Any:
+    return shared.services.clock.now().date()
+
+
+def record_clicks(
+    shared: SharedApp, code: str, days_ago: int, referrer: str | None, count: int = 1
+) -> None:
+    """Store ``count`` clicks of ``code`` made ``days_ago`` days before the app's 'now'."""
+    link = shared.services.links.get(code, "alice")
+    when = shared.services.clock.now() - timedelta(days=days_ago)
+    events = [
+        ClickEvent(link.id, when, referrer, "Chrome", "desktop", f"visitor-{days_ago}-{n}")
+        for n in range(count)
+    ]
+    SqliteClickRepository(shared.services.database).insert_many(events)
+
+
+def export(
+    shared: SharedApp,
+    code: str,
+    days: str | int | None = None,
+    *,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    params: dict[str, str | int] = {}
+    if days is not None:
+        params["days"] = days
+    return shared.client.get(
+        EXPORT_PATH.format(code=code),
+        params=params,
+        headers=shared.alice if headers is None else headers,
+    )
+
+
+def rows_of(response: Any) -> list[list[str]]:
+    assert response.status_code == 200, response.text
+    return list(csv.reader(io.StringIO(response.text, newline="")))
+
+
+@pytest.fixture
+def link_code(shared: SharedApp) -> str:
+    """A fresh link owned by alice: every test gets its own, so rows never overlap."""
+    return make_link(shared)

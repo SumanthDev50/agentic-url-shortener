@@ -1,0 +1,91 @@
+def test_link_redirects_until_the_limit_then_answers_410(
+    client: TestClient, alice: Headers
+) -> None:
+    """A link with ``max_clicks`` of 3 redirects three times; every later request is 410.
+
+    Covers: @@COVERS@@
+    """
+    code = limited(client, alice, 3)
+    assert [client.get(f"/{code}").status_code for _ in range(3)] == [302, 302, 302]
+    for _ in range(2):
+        gone = client.get(f"/{code}")
+        assert gone.status_code == 410
+        error = gone.json()["error"]
+        assert (error["code"], error["message"]) == (
+            "link_gone",
+            "The link has reached its click limit.",
+        )
+    shown = details(client, alice, code)
+    assert (shown["status"], shown["click_count"], shown["remaining_clicks"]) == ("exhausted", 3, 0)
+
+
+def test_cache_entry_is_dropped_when_the_limit_is_reached(
+    migrated_database: Database, clock: FakeClock
+) -> None:
+    """The cache holds only the immutable limit and is invalidated once the limit is used up.
+
+    Covers: @@COVERS@@
+    """
+    harness = Harness(migrated_database, clock)
+    link = harness.create(max_clicks=1)
+    assert harness.service.resolve(link.code).url == "https://example.com/a"
+    assert harness.cache.get(link.code) is not None
+    with pytest.raises(LinkGoneError) as gone:
+        harness.service.resolve(link.code)
+    assert gone.value.reason == LinkStatus.EXHAUSTED
+    assert harness.cache.get(link.code) is None
+
+
+def test_revocation_by_another_instance_stops_a_limited_link_at_once(
+    migrated_database: Database, clock: FakeClock
+) -> None:
+    """A stale cache entry never lets a disabled limited link through (the UPDATE re-checks it).
+
+    Covers: @@COVERS@@
+    """
+    harness = Harness(migrated_database, clock)
+    link = harness.create(max_clicks=5)
+    harness.service.resolve(link.code)  # populates this instance's cache
+    harness.repository.disable(link.code, clock.now())  # another instance disabled the link
+    with pytest.raises(LinkGoneError) as gone:
+        harness.service.resolve(link.code)
+    assert gone.value.reason == LinkStatus.DISABLED
+    stored = SqliteLinkRepository.get_by_code(harness.repository, link.code)
+    assert stored is not None and stored.click_count == 1  # the refused request took nothing
+
+
+def test_expired_limited_link_does_not_consume_a_click(
+    client: TestClient, alice: Headers, clock: FakeClock
+) -> None:
+    """A request refused because the link expired leaves the allowance untouched.
+
+    Covers: @@COVERS@@
+    """
+    created = create(client, alice, max_clicks=3, ttl_seconds=60).json()
+    clock.advance(60)
+    gone = client.get(f"/{created['code']}")
+    assert gone.status_code == 410
+    assert gone.json()["error"]["message"] == "The link has expired."
+    shown = details(client, alice, created["code"])
+    assert (shown["status"], shown["click_count"], shown["remaining_clicks"]) == ("expired", 0, 3)
+
+
+def test_click_recorder_does_not_count_limited_clicks_twice(
+    client: TestClient, services: Services, alice: Headers
+) -> None:
+    """The background writer leaves ``click_count`` of limited links to the atomic consume.
+
+    Counting twice would exhaust ``max_clicks`` of 4 after two redirects.
+
+    Covers: @@COVERS@@
+    """
+    code = limited(client, alice, 4)
+    assert [client.get(f"/{code}").status_code for _ in range(3)] == [302, 302, 302]
+    flush(services)
+    shown = details(client, alice, code)
+    assert (shown["click_count"], shown["remaining_clicks"]) == (3, 1)
+    analytics = client.get(f"/api/v1/links/{code}/analytics", headers=alice).json()
+    assert analytics["total_clicks"] == 3  # the analytics rows are still written
+    assert client.get(f"/{code}").status_code == 302  # the fourth click is still granted
+    flush(services)
+    assert client.get(f"/{code}").status_code == 410

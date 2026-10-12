@@ -1,0 +1,59 @@
+@pytest.mark.parametrize(
+    "value", [0, -1, MAX_CLICKS + 1, "x", "5", True, False, 2.5, [1], {"n": 1}]
+)
+def test_api_rejects_invalid_max_clicks_and_stores_nothing(
+    client: TestClient, alice: Headers, value: object
+) -> None:
+    """Out-of-range and mistyped ``max_clicks`` values answer 422 and create no link.
+
+    Covers: @@COVERS@@
+    """
+    control = create(client, alice, max_clicks=MIN_CLICKS)
+    assert control.status_code == 201  # the field exists: the rejections are about the value
+    response = create(client, alice, max_clicks=value)
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "validation_error"
+    assert any(detail["location"] == "body.max_clicks" for detail in error["details"])
+    assert client.get("/api/v1/links", headers=alice).json()["total"] == 1
+
+
+@pytest.mark.parametrize("value", [MIN_CLICKS, MAX_CLICKS])
+def test_boundary_values_are_accepted(client: TestClient, alice: Headers, value: int) -> None:
+    """The smallest and the largest allowed ``max_clicks`` create a link.
+
+    Covers: @@COVERS@@
+    """
+    response = create(client, alice, max_clicks=value)
+    assert response.status_code == 201
+    assert response.json()["remaining_clicks"] == value
+
+
+def test_service_validation_is_a_second_line_of_defence() -> None:
+    """``validate_click_limit`` rejects what the API schema would reject.
+
+    Covers: @@COVERS@@
+    """
+    from shortener.domain.errors import InvalidClickLimitError
+    from shortener.domain.validation import MAX_CLICK_LIMIT, MIN_CLICK_LIMIT, validate_click_limit
+
+    assert (MIN_CLICK_LIMIT, MAX_CLICK_LIMIT) == (MIN_CLICKS, MAX_CLICKS)
+    assert validate_click_limit(None) is None
+    assert validate_click_limit(MIN_CLICKS) == MIN_CLICKS
+    assert validate_click_limit(MAX_CLICKS) == MAX_CLICKS
+    for bad in (MIN_CLICKS - 1, MAX_CLICKS + 1, True, "5", 2.5, [1]):
+        with pytest.raises(InvalidClickLimitError):
+            validate_click_limit(bad)
+
+
+def test_database_rejects_a_limit_below_the_minimum(migrated_database: Database) -> None:
+    """The column's CHECK constraint refuses a limit that the domain would never produce.
+
+    Covers: @@COVERS@@
+    """
+    with pytest.raises(sqlite3.IntegrityError):
+        migrated_database.connection().execute(
+            "INSERT INTO links (code, original_url, created_at, created_by, max_clicks) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("zero-cap", DESTINATION, STORED_AT, "alice", MIN_CLICKS - 1),
+        )

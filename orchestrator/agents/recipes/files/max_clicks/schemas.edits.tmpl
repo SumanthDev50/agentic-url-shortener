@@ -1,0 +1,122 @@
+@@# Anchored edits of shortener/api/schemas.py (domain-api group).
+
+@@@ edit pydantic-import
+@@@ anchor
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+@@@ replace
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
+@@@ end
+
+@@@ edit validation-import
+@@@ anchor
+from shortener.domain.validation import (
+    MAX_TTL_SECONDS,
+    MAX_URL_LENGTH,
+    MIN_TTL_SECONDS,
+)
+@@@ replace
+from shortener.domain.validation import (
+    MAX_CLICK_LIMIT,
+    MAX_TTL_SECONDS,
+    MAX_URL_LENGTH,
+    MIN_CLICK_LIMIT,
+    MIN_TTL_SECONDS,
+)
+@@@ end
+
+@@@ edit request-field
+@@@ anchor
+        description="Relative expiry in seconds. Mutually exclusive with expires_at.",
+        examples=[3600],
+    )
+@@@ replace
+        description="Relative expiry in seconds. Mutually exclusive with expires_at.",
+        examples=[3600],
+    )
+    max_clicks: int | None = Field(
+        default=None,
+        ge=MIN_CLICK_LIMIT,
+        le=MAX_CLICK_LIMIT,
+        strict=True,
+        description=(
+            "Optional click limit: after this many redirects the short URL answers 410. "
+            "Omit (or send null) for an unlimited link."
+        ),
+        examples=[100],
+    )
+@@@ end
+
+@@@ edit request-fingerprint
+@@@ anchor
+        except ValueError:
+            raise ValueError("expires_at must be an ISO-8601 date-time with a UTC offset") from None
+@@@ replace
+        except ValueError:
+            raise ValueError("expires_at must be an ISO-8601 date-time with a UTC offset") from None
+
+    def fingerprint_payload(self) -> dict[str, object]:
+        """Payload hashed for idempotency: a request without a limit hashes exactly as before."""
+        payload: dict[str, object] = self.model_dump(mode="json")
+        if self.max_clicks is None:
+            del payload["max_clicks"]
+        return payload
+@@@ end
+
+@@@ edit status-description
+@@@ anchor
+    status: LinkStatus = Field(description="active, expired or disabled.")
+@@@ replace
+    status: LinkStatus = Field(description="active, expired, disabled or exhausted.")
+@@@ end
+
+@@@ edit click-count-and-limit-fields
+@@@ anchor
+    click_count: int = Field(
+        description="Recorded clicks. Eventually consistent: updated by a background writer."
+    )
+@@@ replace
+    click_count: int = Field(
+        description=(
+            "Recorded clicks. Eventually consistent for links without a limit (updated by a "
+            "background writer); exact for links with a click limit."
+        )
+    )
+    max_clicks: int | None = Field(
+        default=None, description="The click limit. Omitted for links without one."
+    )
+    remaining_clicks: int | None = Field(
+        default=None,
+        description="Redirects left before the link answers 410. Omitted for unlimited links.",
+    )
+
+    # Deliberately without type hints: pydantic derives the OpenAPI schema from a return
+    # annotation, and a ``dict`` annotation would replace the properties by a free-form object.
+    @model_serializer(mode="wrap")
+    def _omit_missing_limit(self, handler):
+        """Links without a limit serialise exactly as before: no new keys at all."""
+        data = handler(self)
+        if self.max_clicks is None:
+            data.pop("max_clicks", None)
+            data.pop("remaining_clicks", None)
+        return data
+@@@ end
+
+@@@ edit from-link
+@@@ anchor
+            status=status,
+            click_count=link.click_count,
+        )
+@@@ replace
+            status=status,
+            click_count=link.click_count,
+            max_clicks=link.max_clicks,
+            remaining_clicks=link.remaining_clicks,
+        )
+@@@ end
+
+@@@ edit gone-description
+@@@ anchor
+    410: "The link is expired or disabled.",
+@@@ replace
+    410: "The link is expired, disabled or has used up its click limit.",
+@@@ end

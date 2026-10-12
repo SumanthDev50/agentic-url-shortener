@@ -1,0 +1,43 @@
+@@# Anchored edits of docs/api.md (docs node). The file is generated from the OpenAPI schema by
+@@# ``python -m shortener.apidoc`` and a product test compares it with the generator output, so
+@@# these edits reproduce exactly what the generator prints for the changed schema. They only
+@@# run when docs/api.md exists in the docs view; otherwise the feature page tells the operator to
+@@# regenerate it.
+
+@@@ edit gone-response
+@@@ anchor
+| 410 | The link is expired or disabled. | `ErrorResponse` (application/json) |
+@@@ replace
+| 410 | The link is expired, disabled or has used up its click limit. | `ErrorResponse` (application/json) |
+@@@ end
+
+@@@ edit request-field
+@@@ anchor
+| `ttl_seconds` | `integer or null` | no | Relative expiry in seconds. Mutually exclusive with expires_at. Constraints: `minimum=60, maximum=157680000`. |
+@@@ replace
+| `ttl_seconds` | `integer or null` | no | Relative expiry in seconds. Mutually exclusive with expires_at. Constraints: `minimum=60, maximum=157680000`. |
+| `max_clicks` | `integer or null` | no | Optional click limit: after this many redirects the short URL answers 410. Omit (or send null) for an unlimited link. Constraints: `minimum=@@MIN_VALUE_PLAIN@@, maximum=@@MAX_VALUE_PLAIN@@`. |
+@@@ end
+
+@@@ edit status-field
+@@@ anchor
+| `status` | `LinkStatus` | yes | active, expired or disabled. |
+@@@ replace
+| `status` | `LinkStatus` | yes | active, expired, disabled or exhausted. |
+@@@ end
+
+@@@ edit click-count-and-limit-fields
+@@@ anchor
+| `click_count` | `integer` | yes | Recorded clicks. Eventually consistent: updated by a background writer. |
+@@@ replace
+| `click_count` | `integer` | yes | Recorded clicks. Eventually consistent for links without a limit (updated by a background writer); exact for links with a click limit. |
+| `max_clicks` | `integer or null` | no | The click limit. Omitted for links without one. |
+| `remaining_clicks` | `integer or null` | no | Redirects left before the link answers 410. Omitted for unlimited links. |
+@@@ end
+
+@@@ edit status-enum
+@@@ anchor
+One of: `active`, `expired`, `disabled`.
+@@@ replace
+One of: `active`, `expired`, `disabled`, `exhausted`.
+@@@ end

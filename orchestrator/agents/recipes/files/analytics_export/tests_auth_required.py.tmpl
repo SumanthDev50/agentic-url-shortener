@@ -1,0 +1,30 @@
+def test_the_export_requires_an_api_key(shared: SharedApp, link_code: str) -> None:
+    """Missing and wrong API keys get the 401 error model and no data.
+
+    Covers: @@COVERS@@
+    """
+    import secrets
+
+    record_clicks(shared, link_code, 0, "https://a.example")
+    for headers in ({}, {"X-API-Key": secrets.token_urlsafe(32)}):
+        response = export(shared, link_code, 1, headers=headers)
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "ApiKey"
+        assert response.json()["error"]["code"] == "unauthorized"
+        assert "text/csv" not in response.headers["content-type"]
+        assert "a.example" not in response.text
+
+
+def test_the_export_route_declares_the_api_key_scheme(shared: SharedApp) -> None:
+    """The OpenAPI operation is secured like the other management routes.
+
+    Covers: @@COVERS@@
+    """
+    from typing import cast
+
+    from fastapi import FastAPI
+
+    spec = cast(FastAPI, shared.client.app).openapi()
+    operation = spec["paths"]["/api/v1/links/{code}/analytics/export.csv"]["get"]
+    assert operation["security"] == [{"ApiKeyAuth": []}]
+    assert {"401", "404", "422", "429"} <= set(operation["responses"])

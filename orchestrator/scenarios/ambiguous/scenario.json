@@ -1,0 +1,156 @@
+{
+  "schema": 1,
+  "name": "ambiguous",
+  "title": "Vague reporting request: clarification, deferral, mid-run amendment and re-plan",
+  "kind": "ambiguous",
+  "request_file": "request.md",
+  "baseline": {
+    "source": "repo",
+    "include": [
+      "shortener/**",
+      "tests/__init__.py",
+      "tests/shortener/**",
+      "docs/api.md",
+      "docs/product-notes.md",
+      "pyproject.toml"
+    ],
+    "exclude": []
+  },
+  "params": {
+    "perf_budget_ms": 250
+  },
+  "workflow": {
+    "autonomy_mode": "guided",
+    "max_parallel": 4,
+    "promote": "bundle"
+  },
+  "faults": [],
+  "script": [
+    {
+      "on": "run.waiting",
+      "do": "approve",
+      "request": {
+        "node": "integrate"
+      },
+      "by": [
+        "alice",
+        "bob"
+      ],
+      "comment": "reviewed the integrated change set and accept the change-size budget waiver (CHG-002)"
+    },
+    {
+      "on": "run.waiting",
+      "do": "answer",
+      "by": "carol",
+      "answers": [
+        {
+          "match": "(?i)report",
+          "answer": "CSV export of daily click counts per link for a selectable window of up to 90 days"
+        },
+        {
+          "match": "(?i)fast|latenc|perform|speed",
+          "answer": "The export must respond within 250 ms (p95) for 90 days of data"
+        },
+        {
+          "match": "(?i)safe|secur",
+          "answer": "Out of scope for this iteration; tracked separately"
+        },
+        {
+          "match": "(?i).*",
+          "answer": "@default"
+        }
+      ]
+    },
+    {
+      "on": "node.succeeded:design",
+      "do": "amend",
+      "by": "carol",
+      "text_file": "amendment.md",
+      "reason": "stakeholder extended the export window after design review"
+    },
+    {
+      "on": "run.waiting",
+      "do": "approve",
+      "request": {
+        "node": "requirements"
+      },
+      "by": [
+        "alice"
+      ],
+      "comment": "assumptions and deferral reviewed"
+    },
+    {
+      "on": "run.waiting",
+      "do": "approve",
+      "request": {
+        "node": "design"
+      },
+      "by": [
+        "alice"
+      ],
+      "comment": "design reviewed"
+    },
+    {
+      "on": "run.waiting",
+      "do": "approve",
+      "request": {
+        "node": "implement.*"
+      },
+      "by": [
+        "alice"
+      ],
+      "comment": "reviewed"
+    },
+    {
+      "on": "run.waiting",
+      "do": "approve",
+      "request": {
+        "node": "release-readiness"
+      },
+      "by": [
+        "alice",
+        "bob"
+      ],
+      "comment": "go"
+    }
+  ],
+  "expect": {
+    "run_status": "succeeded",
+    "node_statuses": {
+      "codebase-analysis": "succeeded",
+      "release-verify": "succeeded"
+    },
+    "events_present": [
+      "clarification.requested",
+      "clarification.answered",
+      "input.changed",
+      "plan.replanned",
+      "node.cache_hit",
+      "approval.granted"
+    ],
+    "events_absent": [
+      "run.safe_stopped"
+    ],
+    "decision_kinds": [
+      "clarification",
+      "scope",
+      "replan",
+      "approval"
+    ],
+    "replan": {
+      "cache_hits_min": 1
+    },
+    "lineage": [
+      {
+        "artifact": "release_patch",
+        "reaches_decision_kind": "clarification"
+      }
+    ],
+    "artifacts_present": [
+      "release_patch",
+      "readiness_report",
+      "traceability_matrix"
+    ],
+    "blocking_questions": 0
+  }
+}

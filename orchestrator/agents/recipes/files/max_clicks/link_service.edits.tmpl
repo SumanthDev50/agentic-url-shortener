@@ -1,0 +1,163 @@
+@@# Anchored edits of shortener/services/link_service.py (service group).
+
+@@@ edit module-docstring
+@@@ anchor
+miss.  ``disable`` invalidates the cache entry immediately; other instances learn about it after
+the positive-cache TTL (documented revocation lag).
+"""
+@@@ replace
+miss.  ``disable`` invalidates the cache entry immediately; other instances learn about it after
+the positive-cache TTL (documented revocation lag).
+
+Links with a click limit (``max_clicks``) never take their allowance from the cache: the cached
+entry only says "limited" (the limit is immutable), and every redirect consumes one click with a
+single atomic conditional UPDATE (``LinkRepository.consume_click``).  A refusal means the
+allowance is used up: the entry is dropped and the request answers 410.  The background click
+writer leaves the counter of limited links alone, so a click is never counted twice.
+"""
+@@@ end
+
+@@@ edit validation-import
+@@@ anchor
+    resolve_expiry,
+    validate_alias,
+    validate_destination_url,
+)
+@@@ replace
+    resolve_expiry,
+    validate_alias,
+    validate_click_limit,
+    validate_destination_url,
+)
+@@@ end
+
+@@@ edit cached-target-field
+@@@ anchor
+    expires_at: datetime | None
+    disabled: bool
+@@@ replace
+    expires_at: datetime | None
+    disabled: bool
+    max_clicks: int | None = None
+@@@ end
+
+@@@ edit create
+@@@ anchor
+        ttl_seconds: int | None = None,
+    ) -> Link:
+        """Validate the request and persist a new link owned by ``owner``."""
+        now = self._clock.now()
+        destination = validate_destination_url(url, self._url_policy)
+        expiry = resolve_expiry(now=now, expires_at=expires_at, ttl_seconds=ttl_seconds)
+        if alias is not None:
+            link = self._insert_alias(validate_alias(alias), destination, now, expiry, owner)
+        else:
+            link = self._insert_generated(destination, now, expiry, owner)
+@@@ replace
+        ttl_seconds: int | None = None,
+        max_clicks: int | None = None,
+    ) -> Link:
+        """Validate the request and persist a new link owned by ``owner``."""
+        now = self._clock.now()
+        destination = validate_destination_url(url, self._url_policy)
+        expiry = resolve_expiry(now=now, expires_at=expires_at, ttl_seconds=ttl_seconds)
+        limit = validate_click_limit(max_clicks)
+        if alias is not None:
+            link = self._insert_alias(validate_alias(alias), destination, now, expiry, owner, limit)
+        else:
+            link = self._insert_generated(destination, now, expiry, owner, limit)
+@@@ end
+
+@@@ edit resolve-docstring
+@@@ anchor
+        """Redirect hot path: 404 unknown, 410 expired/disabled, else the target."""
+@@@ replace
+        """Redirect hot path: 404 unknown, 410 expired/disabled/exhausted, else the target."""
+@@@ end
+
+@@@ edit resolve-consume
+@@@ anchor
+            raise LinkGoneError(LinkStatus.EXPIRED, "The link has expired.")
+        return ResolvedLink(link_id=target.link_id, url=target.url)
+@@@ replace
+            raise LinkGoneError(LinkStatus.EXPIRED, "The link has expired.")
+        if target.max_clicks is not None:
+            self._consume_click(code)
+        return ResolvedLink(link_id=target.link_id, url=target.url)
+@@@ end
+
+@@@ edit consume-click-method
+@@@ anchor
+    def _lookup(self, code: str) -> CachedTarget:
+@@@ replace
+    def _consume_click(self, code: str) -> None:
+        """Take one click from a limited link's allowance; the database alone decides."""
+        if self._links.consume_click(code):
+            return
+        self._cache.invalidate(code)  # the allowance is used up (or the link changed): drop it
+        link = self._links.get_by_code(code)
+        if link is None:
+            raise LinkNotFoundError
+        if link.disabled_at is not None:
+            raise LinkGoneError(LinkStatus.DISABLED, "The link has been disabled.")
+        raise LinkGoneError(LinkStatus.EXHAUSTED, "The link has reached its click limit.")
+
+    def _lookup(self, code: str) -> CachedTarget:
+@@@ end
+
+@@@ edit lookup-caches-limit
+@@@ anchor
+            expires_at=link.expires_at,
+            disabled=link.disabled_at is not None,
+        )
+@@@ replace
+            expires_at=link.expires_at,
+            disabled=link.disabled_at is not None,
+            max_clicks=link.max_clicks,
+        )
+@@@ end
+
+@@@ edit insert-alias
+@@@ anchor
+    def _insert_alias(
+        self, alias: str, url: str, now: datetime, expiry: datetime | None, owner: str
+    ) -> Link:
+        try:
+            return self._links.insert(NewLink(alias, url, now, expiry, owner))
+@@@ replace
+    def _insert_alias(
+        self,
+        alias: str,
+        url: str,
+        now: datetime,
+        expiry: datetime | None,
+        owner: str,
+        max_clicks: int | None,
+    ) -> Link:
+        try:
+            return self._links.insert(NewLink(alias, url, now, expiry, owner, max_clicks))
+@@@ end
+
+@@@ edit insert-generated
+@@@ anchor
+    def _insert_generated(
+        self, url: str, now: datetime, expiry: datetime | None, owner: str
+    ) -> Link:
+        """Try bounded, unique-constraint-checked candidates; never loop without limit."""
+        for code in self._codes.candidates():
+            try:
+                return self._links.insert(NewLink(code, url, now, expiry, owner))
+@@@ replace
+    def _insert_generated(
+        self,
+        url: str,
+        now: datetime,
+        expiry: datetime | None,
+        owner: str,
+        max_clicks: int | None,
+    ) -> Link:
+        """Try bounded, unique-constraint-checked candidates; never loop without limit."""
+        for code in self._codes.candidates():
+            try:
+                return self._links.insert(NewLink(code, url, now, expiry, owner, max_clicks))
+@@@ end

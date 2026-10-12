@@ -1,0 +1,103 @@
+"""CSV rendering of daily click counts, hardened against spreadsheet formula injection.
+
+Spreadsheet programs evaluate a cell that starts with ``=``, ``+``, ``-`` or ``@`` (and, in some
+programs, a tab or a carriage return) as a formula, so a hostile value such as a stored referrer
+could run commands or leak data on the analyst's machine (CSV / DDE injection).  Every text cell
+therefore goes through :func:`neutralize_cell`, which prefixes a single quote whenever the cell
+could be read as a formula (OWASP guidance).  The check looks past leading spaces and invisible
+characters and normalises look-alike characters (full-width ``=``, ``+``, ``-``, ``@``) before it
+decides.  Number and date cells are produced from ``int`` and ``date`` values only.
+
+Separators, quotes and line breaks are left to the standard :mod:`csv` writer, so a value can
+never add a cell or a row.  The module performs no I/O.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import re
+import unicodedata
+from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import date
+
+CSV_MEDIA_TYPE = "text/csv; charset=utf-8"
+HEADER = ("code", "date", "clicks", "top_referrer")
+MAX_CELL_CHARS = 512
+MAX_FILENAME_CHARS = 100
+
+_FORMULA_PREFIXES = frozenset("=+-@")
+_FORMULA_CONTROLS = frozenset("\t\r")
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _reads_as_formula(text: str) -> bool:
+    for char in text:
+        if char in _FORMULA_CONTROLS:
+            return True
+        if char.isspace() or unicodedata.category(char) in ("Cc", "Cf"):
+            continue  # an invisible lead-in: what follows decides
+        return unicodedata.normalize("NFKC", char)[:1] in _FORMULA_PREFIXES
+    return False
+
+
+def neutralize_cell(value: str) -> str:
+    """``value`` (capped at ``MAX_CELL_CHARS``), single-quote prefixed if a spreadsheet could
+    read it as a formula."""
+    text = value[:MAX_CELL_CHARS]
+    return f"'{text}" if _reads_as_formula(text) else text
+
+
+def safe_filename(name: str) -> str:
+    """A header-safe file name: ASCII letters, digits, ``.``, ``_`` and ``-`` only."""
+    cleaned = _UNSAFE_FILENAME_CHARS.sub("_", name[: MAX_FILENAME_CHARS * 4]).lstrip("._-")
+    return cleaned[:MAX_FILENAME_CHARS] or "export.csv"
+
+
+def export_filename(code: str, days: int) -> str:
+    """``clicks-<code>-<days>d.csv`` with every unsafe character of ``code`` replaced."""
+    return safe_filename(f"clicks-{code}-{int(days)}d.csv")
+
+
+@dataclass(frozen=True, slots=True)
+class DailyRow:
+    """One export row: a UTC day, its click count and its most frequent referrer (if any)."""
+
+    day: date
+    clicks: int
+    top_referrer: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CsvDownload:
+    """A rendered export: the body plus the response metadata derived from it."""
+
+    filename: str
+    body: str
+
+    @property
+    def media_type(self) -> str:
+        return CSV_MEDIA_TYPE
+
+    @property
+    def content_disposition(self) -> str:
+        return f'attachment; filename="{safe_filename(self.filename)}"'
+
+
+def render_daily_csv(code: str, rows: Iterable[DailyRow]) -> str:
+    """RFC 4180 CSV (CRLF line ends): the header, then one neutralised row per ``DailyRow``."""
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, lineterminator="\r\n")
+    writer.writerow(HEADER)
+    cell_code = neutralize_cell(code)
+    for row in rows:
+        writer.writerow(
+            (
+                cell_code,
+                row.day.isoformat(),
+                str(int(row.clicks)),
+                neutralize_cell(row.top_referrer or ""),
+            )
+        )
+    return buffer.getvalue()

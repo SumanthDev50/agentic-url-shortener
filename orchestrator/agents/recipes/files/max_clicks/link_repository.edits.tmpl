@@ -1,0 +1,140 @@
+@@# Anchored edits of shortener/storage/link_repository.py (storage group).
+@@# Every anchor must occur exactly once in the baseline; otherwise the recipe raises
+@@# RecipeAnchorError instead of guessing.
+
+@@@ edit protocol-consume-click
+@@@ anchor
+    def add_clicks(self, counts: Mapping[int, int]) -> None:
+        """Add per-link click increments (called by the background writer)."""
+        ...
+@@@ replace
+    def consume_click(self, code: str) -> bool:
+        """Atomically take one click from a link's allowance (redirect path of limited links).
+
+        ``False`` when nothing was consumed: unknown code, disabled link or allowance used up.
+        """
+        ...
+
+    def add_clicks(self, counts: Mapping[int, int]) -> None:
+        """Add per-link click increments (called by the background writer).
+
+        Links with a click limit are skipped: ``consume_click`` owns their counter.
+        """
+        ...
+@@@ end
+
+@@@ edit insert-statement
+@@@ anchor
+                    "INSERT INTO links (code, original_url, created_at, expires_at, created_by) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        new.code,
+                        new.original_url,
+                        format_utc(new.created_at),
+                        _format_optional(new.expires_at),
+                        new.created_by,
+                    ),
+@@@ replace
+                    "INSERT INTO links (code, original_url, created_at, expires_at, created_by, "
+                    "max_clicks) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        new.code,
+                        new.original_url,
+                        format_utc(new.created_at),
+                        _format_optional(new.expires_at),
+                        new.created_by,
+                        new.max_clicks,
+                    ),
+@@@ end
+
+@@@ edit insert-result
+@@@ anchor
+            click_count=0,
+            created_by=new.created_by,
+        )
+@@@ replace
+            click_count=0,
+            created_by=new.created_by,
+            max_clicks=new.max_clicks,
+        )
+@@@ end
+
+@@@ edit select-by-code
+@@@ anchor
+                "SELECT id, code, original_url, created_at, expires_at, disabled_at, "
+                "click_count, created_by FROM links WHERE code = ?",
+@@@ replace
+                "SELECT id, code, original_url, created_at, expires_at, disabled_at, "
+                "click_count, created_by, max_clicks FROM links WHERE code = ?",
+@@@ end
+
+@@@ edit select-by-owner
+@@@ anchor
+                "SELECT id, code, original_url, created_at, expires_at, disabled_at, "
+                "click_count, created_by FROM links WHERE created_by = ? "
+                "ORDER BY id DESC LIMIT ? OFFSET ?",
+@@@ replace
+                "SELECT id, code, original_url, created_at, expires_at, disabled_at, "
+                "click_count, created_by, max_clicks FROM links WHERE created_by = ? "
+                "ORDER BY id DESC LIMIT ? OFFSET ?",
+@@@ end
+
+@@@ edit consume-and-add-clicks
+@@@ anchor
+    def add_clicks(self, counts: Mapping[int, int]) -> None:
+        if not counts:
+            return
+        with self._database.transaction() as connection:
+            connection.executemany(
+                "UPDATE links SET click_count = click_count + ? WHERE id = ?",
+                [(count, link_id) for link_id, count in counts.items()],
+            )
+@@@ replace
+    def consume_click(self, code: str) -> bool:
+        # One conditional UPDATE is the whole decision: SQLite serialises writers, so of N
+        # concurrent requests at most (max_clicks - click_count) see ``rowcount == 1``.
+        with self._database.transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE links SET click_count = click_count + 1 "
+                "WHERE code = ? AND disabled_at IS NULL "
+                "AND (max_clicks IS NULL OR click_count < max_clicks)",
+                (code,),
+            )
+        return cursor.rowcount > 0
+
+    def add_clicks(self, counts: Mapping[int, int]) -> None:
+        if not counts:
+            return
+        with self._database.transaction() as connection:
+            connection.executemany(
+                # Limited links are counted by ``consume_click`` at redirect time, never here.
+                "UPDATE links SET click_count = click_count + ? "
+                "WHERE id = ? AND max_clicks IS NULL",
+                [(count, link_id) for link_id, count in counts.items()],
+            )
+@@@ end
+
+@@@ edit to-link
+@@@ anchor
+        click_count=int(row["click_count"]),
+        created_by=row["created_by"],
+    )
+@@@ replace
+        click_count=int(row["click_count"]),
+        created_by=row["created_by"],
+        max_clicks=_parse_optional_int(row["max_clicks"]),
+    )
+@@@ end
+
+@@@ edit parse-optional-int
+@@@ anchor
+def _parse_optional(text: str | None) -> datetime | None:
+    return parse_utc(text) if text is not None else None
+@@@ replace
+def _parse_optional(text: str | None) -> datetime | None:
+    return parse_utc(text) if text is not None else None
+
+
+def _parse_optional_int(value: int | None) -> int | None:
+    return int(value) if value is not None else None
+@@@ end

@@ -1,0 +1,54 @@
+def test_the_window_limit_is_the_requested_maximum() -> None:
+    """The export window runs from one day up to exactly the requested maximum.
+
+    Covers: @@COVERS@@
+    """
+    assert analytics_service.EXPORT_MIN_DAYS == 1
+    assert analytics_service.EXPORT_MAX_DAYS == @@MAX_WINDOW_DAYS@@
+    assert (
+        analytics_service.EXPORT_MIN_DAYS
+        <= analytics_service.EXPORT_DEFAULT_DAYS
+        <= analytics_service.EXPORT_MAX_DAYS
+    )
+
+
+def test_both_window_boundaries_are_accepted(shared: SharedApp, link_code: str) -> None:
+    """One day and the maximum window are exported in full.
+
+    Covers: @@COVERS@@
+    """
+    for days in (1, analytics_service.EXPORT_MAX_DAYS):
+        assert len(rows_of(export(shared, link_code, days))) == days + 1
+
+
+@pytest.mark.parametrize(
+    "days", [0, -1, analytics_service.EXPORT_MAX_DAYS + 1, 10**9, "abc", "1.5", ""]
+)
+def test_out_of_range_windows_are_rejected_without_exporting(
+    shared: SharedApp, link_code: str, days: Any
+) -> None:
+    """Values outside the window are refused with the validation error and no CSV.
+
+    Covers: @@COVERS@@
+    """
+    response = export(shared, link_code, days)
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert "text/csv" not in response.headers["content-type"]
+
+
+@pytest.mark.parametrize(
+    "days", [0, -5, analytics_service.EXPORT_MAX_DAYS + 1, True, 2.5, "7", None]
+)
+def test_the_service_enforces_the_window_independently_of_the_route(
+    shared: SharedApp, link_code: str, days: Any
+) -> None:
+    """The use case rejects bad windows itself, so other callers cannot bypass the limit.
+
+    Covers: @@COVERS@@
+    """
+    from shortener.domain.errors import InvalidInputError
+
+    link = shared.services.links.get(link_code, "alice")
+    with pytest.raises(InvalidInputError):
+        shared.services.analytics.export_daily_csv(link, days)

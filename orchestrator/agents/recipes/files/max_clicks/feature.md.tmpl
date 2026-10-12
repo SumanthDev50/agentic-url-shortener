@@ -1,0 +1,100 @@
+# Click limits (`max_clicks`)
+
+A short link can carry an optional click limit. After the link has been followed `max_clicks`
+times, further requests to the short code answer `410 Gone`. Links without a limit keep working
+exactly as before. Change reference: @@CHANGE_REFERENCE@@.
+
+## Using it
+
+Create a link with an optional `max_clicks`, an integer from @@MIN_VALUE_COMMAS@@ to
+@@MAX_VALUE_COMMAS@@:
+
+```http
+POST /api/v1/links
+X-API-Key: <your key>
+
+{"url": "https://example.com/campaign", "max_clicks": 3}
+```
+
+The response (and the link details, and every item of the list) shows the limit and the
+remaining allowance:
+
+```json
+{
+  "code": "Ab3dE5g",
+  "short_url": "https://sho.example.com/Ab3dE5g",
+  "original_url": "https://example.com/campaign",
+  "created_at": "2026-01-15T12:00:00Z",
+  "expires_at": null,
+  "status": "active",
+  "click_count": 0,
+  "max_clicks": 3,
+  "remaining_clicks": 3
+}
+```
+
+| Situation | Result |
+|---|---|
+| `max_clicks` omitted or `null` | Unlimited link. The JSON has no `max_clicks` / `remaining_clicks` keys at all. |
+| Redirect within the limit | `302`; `click_count` and `remaining_clicks` are exact immediately. |
+| Redirect after the limit | `410` with error code `link_gone` and the message "The link has reached its click limit."; the link status is `exhausted` and `remaining_clicks` is `0`. |
+| Disabled or expired link | `410` as before; a refused request never consumes a click. |
+| `max_clicks` of 0, below @@MIN_VALUE_COMMAS@@, above @@MAX_VALUE_COMMAS@@, not an integer, `true` | `422`; nothing is stored. |
+
+## API compatibility
+
+The change is additive (`breaking: false`): `max_clicks` is an optional request field, the two
+response fields are optional and omitted for unlimited links, and `exhausted` is a new value of
+the response `status`. A request without `max_clicks` has the same idempotency fingerprint as
+before, so a retry that crosses the deployment still replays. `docs/api.md` is generated from the
+OpenAPI schema (`python -m shortener.apidoc`); regenerate it if it was not part of the change.
+
+## How the limit is enforced
+
+`LinkRepository.consume_click` runs one statement,
+
+```sql
+UPDATE links SET click_count = click_count + 1
+WHERE code = ? AND disabled_at IS NULL AND (max_clicks IS NULL OR click_count < max_clicks)
+```
+
+and `LinkService.resolve` treats `rowcount == 0` as "no click left". SQLite serialises writers, so
+of N concurrent requests at most the remaining allowance sees `rowcount == 1`, whatever the number
+of processes. The redirect cache keeps only the immutable limit of a link (so unlimited links keep
+the cached fast path); the allowance is never read from it, and the entry is dropped when the limit
+is reached. The background click writer still stores the analytics rows of limited links but no
+longer adds to their `click_count`, because the redirect path already did.
+
+## Design decisions
+
+@@ADRS@@
+
+## Data model and rollback
+
+The migration `@@MIGRATION_PATH@@` adds the nullable column `links.max_clicks`
+(`CHECK (max_clicks IS NULL OR max_clicks >= @@MIN_VALUE_PLAIN@@)`); existing rows stay `NULL`
+(unlimited) and `/readyz` keeps passing.
+
+@@ROLLBACK@@
+
+## Operating notes
+
+* Take a backup of the SQLite database (and its WAL) before deploying: the migration is
+  forward-only.
+* There are no new metrics; refused redirects show up in `shortener_http_requests_total` with
+  status `410`.
+* Every redirect of a limited link performs one short write transaction. The redirect rate limiter
+  still runs first.
+
+## Limitations
+
+* The limit counts granted redirects: every `302` counts, including link-preview bots and
+  repeat visits of the same person. It is not a unique-visitor limit.
+* The limit cannot be changed or reset after creation (the API has no update endpoint); that
+  immutability is what allows the cache to keep it.
+* `click_count` is exact for links with a limit and eventually consistent for the others. The
+  analytics total of a limited link (`clicks` table) can be lower than `click_count` if the click
+  queue drops events.
+* A consumed click is not given back if the connection breaks after the redirect was decided.
+* An exhausted link costs one UPDATE (no row changes), one lookup and a `410` per request;
+  caching that terminal state is a possible follow-up.

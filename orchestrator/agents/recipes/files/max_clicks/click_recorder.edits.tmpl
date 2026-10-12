@@ -1,0 +1,18 @@
+@@# Anchored edit of shortener/services/click_recorder.py (service group): documentation only.
+@@# The behaviour change itself is the ``AND max_clicks IS NULL`` guard of
+@@# LinkRepository.add_clicks (storage group).
+
+@@@ edit writer-docstring
+@@@ anchor
+    ``click_count`` is therefore eventually consistent: it lags a redirect by the queue delay
+    (see ``docs/product-notes.md`` for the trade-off and the limited-click implications).
+    """
+@@@ replace
+    ``click_count`` is therefore eventually consistent: it lags a redirect by the queue delay
+    (see ``docs/product-notes.md`` for the trade-off and the limited-click implications).
+
+    Links with a click limit are the exception: ``LinkService.resolve`` consumes their allowance
+    atomically on the redirect path and ``LinkRepository.add_clicks`` leaves their counter alone,
+    so a click is never counted twice (their analytics rows are still written here).
+    """
+@@@ end

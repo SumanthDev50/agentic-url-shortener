@@ -1,0 +1,52 @@
+"""Tests for linkcheck.report: the summary of a batch of check results."""
+
+from __future__ import annotations
+
+@@IMPORTS@@
+
+
+def result(url, classification, reason="x"):
+    return CheckResult(url, Classification(classification), None, 1, reason)
+
+
+# @@ASPECT report@@
+def test_report_counts_every_classification_and_lists_the_unhealthy_links():
+    """One count per classification (zeros included) and every unhealthy link, in input order.
+
+    @@COVERS@@
+    """
+    items = [
+        result("http://a.example/", "healthy"),
+        result("http://b.example/", "redirecting"),
+        result("http://c.example/", "client_error", "http_404"),
+        result("http://d.example/", "server_error", "http_503"),
+        result("http://e.example/", "timeout", "timeout"),
+        result("http://f.example/", "blocked", "private_address"),
+        result("http://g.example/", "healthy"),
+    ]
+    report = summarize(items)
+    assert report.total == 7
+    assert report.counts == {
+        "healthy": 2,
+        "redirecting": 1,
+        "client_error": 1,
+        "server_error": 1,
+        "timeout": 1,
+        "blocked": 1,
+    }
+    assert [r.url for r in report.unhealthy] == [i.url for i in items[2:6]]
+    text = report.render()
+    assert all(i.url in text for i in items[2:6]) and "http://a.example/" not in text
+    assert json.loads(json.dumps(report.to_dict()))["counts"] == report.counts
+    assert summarize([]).counts == dict.fromkeys(report.counts, 0)
+
+
+def test_report_output_cannot_be_forged_by_a_hostile_url():
+    """Control characters in a URL are neutralised so one link cannot fake extra report lines.
+
+    @@COVERS@@
+    """
+    hostile = result("http://x.example/\x1b[2J\nUnhealthy links: 0", "blocked", "bad\r\nreason")
+    text = summarize([hostile]).render()
+    assert "\x1b" not in text and "\r" not in text
+    assert len(text.splitlines()) == 9

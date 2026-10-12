@@ -1,0 +1,62 @@
+@@# Anchored edits of shortener/domain/models.py (domain-api group).
+
+@@@ edit status-exhausted
+@@@ anchor
+    DISABLED = "disabled"
+@@@ replace
+    DISABLED = "disabled"
+    EXHAUSTED = "exhausted"
+@@@ end
+
+@@@ edit new-link-field
+@@@ anchor
+    expires_at: datetime | None
+    created_by: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Link:
+@@@ replace
+    expires_at: datetime | None
+    created_by: str | None
+    max_clicks: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Link:
+@@@ end
+
+@@@ edit link-field-and-status
+@@@ anchor
+    click_count: int
+    created_by: str | None
+
+    def status_at(self, now: datetime) -> LinkStatus:
+        """Disabled wins over expired; expiry is inclusive of the expiry instant."""
+        if self.disabled_at is not None:
+            return LinkStatus.DISABLED
+        if self.expires_at is not None and now >= self.expires_at:
+            return LinkStatus.EXPIRED
+        return LinkStatus.ACTIVE
+@@@ replace
+    click_count: int
+    created_by: str | None
+    max_clicks: int | None = None
+
+    @property
+    def remaining_clicks(self) -> int | None:
+        """Clicks left of a limited link (never negative); ``None`` when there is no limit."""
+        if self.max_clicks is None:
+            return None
+        return max(self.max_clicks - self.click_count, 0)
+
+    def status_at(self, now: datetime) -> LinkStatus:
+        """Disabled wins over expired, expired over exhausted; expiry includes its instant."""
+        if self.disabled_at is not None:
+            return LinkStatus.DISABLED
+        if self.expires_at is not None and now >= self.expires_at:
+            return LinkStatus.EXPIRED
+        if self.remaining_clicks == 0:
+            return LinkStatus.EXHAUSTED
+        return LinkStatus.ACTIVE
+@@@ end

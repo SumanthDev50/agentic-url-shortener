@@ -1,0 +1,47 @@
+@@# Anchored edits of shortener/domain/validation.py (domain-api group).
+
+@@@ edit import-error
+@@@ anchor
+from shortener.domain.errors import (
+    InvalidAliasError,
+    InvalidExpiryError,
+@@@ replace
+from shortener.domain.errors import (
+    InvalidAliasError,
+    InvalidClickLimitError,
+    InvalidExpiryError,
+@@@ end
+
+@@@ edit limit-constants
+@@@ anchor
+MAX_EXPIRY_SPAN = timedelta(seconds=MAX_TTL_SECONDS)
+@@@ replace
+MAX_EXPIRY_SPAN = timedelta(seconds=MAX_TTL_SECONDS)
+MIN_CLICK_LIMIT = @@MIN_VALUE@@
+MAX_CLICK_LIMIT = @@MAX_VALUE@@
+@@@ end
+
+@@@ edit validate-click-limit
+@@@ anchor
+# --------------------------------------------------------------------------- idempotency
+@@@ replace
+# --------------------------------------------------------------------------- click limit
+
+
+def validate_click_limit(max_clicks: object) -> int | None:
+    """Return the click limit unchanged (``None`` means unlimited) if it is an integer in range."""
+    if max_clicks is None:
+        return None
+    if (
+        isinstance(max_clicks, bool)
+        or not isinstance(max_clicks, int)
+        or not MIN_CLICK_LIMIT <= max_clicks <= MAX_CLICK_LIMIT
+    ):
+        raise InvalidClickLimitError(
+            f"max_clicks must be an integer between {MIN_CLICK_LIMIT} and {MAX_CLICK_LIMIT}."
+        )
+    return max_clicks
+
+
+# --------------------------------------------------------------------------- idempotency
+@@@ end

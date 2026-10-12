@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Local configuration and data (never commit secrets)
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# Orchestrator run state (audit logs, artifacts, sandboxes). Curated sample
+# runs live under docs/sample-runs/ and are committed deliberately.
+.agentic/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

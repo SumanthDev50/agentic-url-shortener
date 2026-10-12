@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "name": "greenfield",
+  "title": "Destination health checker (new standalone module from an empty workspace)",
+  "kind": "greenfield",
+  "request_file": "request.md",
+  "baseline": {
+    "empty": true
+  },
+  "params": {},
+  "workflow": {
+    "autonomy_mode": "guided",
+    "max_parallel": 4,
+    "promote": "bundle"
+  },
+  "faults": [
+    {
+      "node": "implement.*",
+      "fault": "transient",
+      "attempts": 2
+    }
+  ],
+  "script": [
+    {
+      "on": "run.waiting",
+      "do": "approve",
+      "request": {
+        "node": "integrate"
+      },
+      "by": [
+        "alice"
+      ],
+      "comment": "reviewed: new standalone module with its tests; accepting the change-size budget waiver (CHG-002)"
+    },
+    {
+      "on": "run.waiting",
+      "do": "approve",
+      "request": {
+        "node": "release-readiness"
+      },
+      "by": [
+        "agent:implementer",
+        "system",
+        "alice",
+        "bob"
+      ],
+      "comment": "reviewed readiness report, patch and traceability matrix"
+    }
+  ],
+  "expect": {
+    "run_status": "succeeded",
+    "node_statuses": {
+      "codebase-analysis": "skipped",
+      "release-verify": "succeeded"
+    },
+    "node_status_patterns": {
+      "implement.*": "succeeded"
+    },
+    "events_present": [
+      "node.skipped",
+      "node.retry_scheduled",
+      "approval.refused",
+      "approval.granted",
+      "node.succeeded"
+    ],
+    "events_absent": [
+      "run.safe_stopped"
+    ],
+    "decision_kinds": [
+      "design",
+      "approval"
+    ],
+    "min_parallel_width": 2,
+    "artifacts_present": [
+      "release_patch",
+      "readiness_report",
+      "traceability_matrix",
+      "test_report"
+    ],
+    "blocking_questions": 0
+  }
+}

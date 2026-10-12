@@ -1,0 +1,111 @@
+"""LinkChecker: classification, retry with exponential back-off and the injected Fetcher.
+
+Every attempt starts with the URL guard (scheme allow-list, SSRF policy, name resolution), then
+performs one request through the ``Fetcher``. Only timeouts and 5xx responses are retried, up to
+``Settings.max_retries`` times, waiting base, 2*base, 4*base, ... seconds between attempts.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Callable, Iterable
+from functools import partial
+
+from linkcheck.fetcher import HttpFetcher, system_resolver
+from linkcheck.guard import Blocked, Resolver, UrlGuard
+from linkcheck.model import (
+    TRANSIENT,
+    CheckResult,
+    Classification,
+    Fetcher,
+    FetchError,
+    FetchRequest,
+    FetchTimeout,
+    ResolutionError,
+    ResolutionTimeout,
+    display_text,
+)
+from linkcheck.settings import Settings
+
+
+def classify(status: int) -> tuple[Classification, str]:
+    """Map an HTTP status code to ``(classification, reason)``."""
+    if 200 <= status < 300:
+        return Classification.HEALTHY, "ok"
+    if 300 <= status < 400:
+        return Classification.REDIRECTING, "redirect"
+    if 400 <= status < 500:
+        return Classification.CLIENT_ERROR, f"http_{status}"
+    if 500 <= status < 600:
+        return Classification.SERVER_ERROR, f"http_{status}"
+    return Classification.SERVER_ERROR, "invalid_status"
+
+
+class LinkChecker:
+    """Checks destinations one after the other; holds no mutable state, so it may be shared.
+
+    ``fetcher``, ``resolver`` and ``sleep`` are injectable: a unit test needs no network.
+    """
+
+    def __init__(
+        self,
+        fetcher: Fetcher | None = None,
+        *,
+        settings: Settings | None = None,
+        resolver: Resolver | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.settings = settings if settings is not None else Settings()
+        self._fetcher = fetcher if fetcher is not None else HttpFetcher()
+        timeout = self.settings.timeout_seconds
+        lookup = resolver if resolver is not None else partial(system_resolver, timeout=timeout)
+        self._guard = UrlGuard(lookup)
+        self._sleep = sleep
+
+    def check(self, url: str) -> CheckResult:
+        """Check one destination. Never raises for a bad URL or an unreachable host."""
+        shown = display_text(url)
+        attempt = 1
+        while True:
+            result = self._attempt(url, shown, attempt)
+            if result.classification not in TRANSIENT or attempt > self.settings.max_retries:
+                return result
+            self._sleep(self.settings.backoff_delay(attempt))
+            attempt += 1
+
+    def check_many(self, urls: Iterable[str]) -> list[CheckResult]:
+        return [self.check(url) for url in urls]
+
+    def _attempt(self, url: str, shown: str, attempt: int) -> CheckResult:
+        def outcome(
+            kind: Classification,
+            reason: str,
+            status: int | None = None,
+            location: str | None = None,
+        ) -> CheckResult:
+            return CheckResult(shown, kind, status, attempt, reason, location)
+
+        try:
+            target = self._guard.inspect(url)
+            response = self._fetcher.fetch(
+                FetchRequest(
+                    target.url,
+                    target.scheme,
+                    target.host,
+                    target.port,
+                    target.path,
+                    target.addresses,
+                    float(self.settings.timeout_seconds),
+                )
+            )
+        except Blocked as exc:
+            return outcome(Classification.BLOCKED, exc.reason)
+        except (FetchTimeout, ResolutionTimeout):
+            return outcome(Classification.TIMEOUT, "timeout")
+        except ResolutionError:
+            return outcome(Classification.CLIENT_ERROR, "unresolvable_host")
+        except FetchError as exc:
+            return outcome(Classification.SERVER_ERROR, display_text(exc.reason, 40))
+        kind, reason = classify(response.status)
+        location = response.location if kind is Classification.REDIRECTING else None
+        return outcome(kind, reason, response.status, display_text(location) if location else None)

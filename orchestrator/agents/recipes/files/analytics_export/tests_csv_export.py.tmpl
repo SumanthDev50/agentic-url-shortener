@@ -1,0 +1,139 @@
+def test_export_is_a_zero_filled_daily_csv_attachment(shared: SharedApp, link_code: str) -> None:
+    """One CSV row per UTC day, with the click count and the day's most frequent referrer.
+
+    Covers: @@COVERS@@
+    """
+    record_clicks(shared, link_code, 0, "https://a.example", count=2)
+    record_clicks(shared, link_code, 0, "https://b.example")
+    days = window(3)
+    response = export(shared, link_code, days)
+    assert response.headers["content-type"] == "text/csv; charset=utf-8"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    today = today_of(shared)
+    zero_days = [
+        [link_code, str(today - timedelta(days=ago)), "0", ""] for ago in range(days - 1, 0, -1)
+    ]
+    assert rows_of(response) == [
+        HEADER_ROW,
+        *zero_days,
+        [link_code, str(today), "3", "https://a.example"],
+    ]
+
+
+@needs_two_days
+def test_clicks_are_counted_on_their_own_utc_day(shared: SharedApp, link_code: str) -> None:
+    """Yesterday's clicks are not merged into today's row; each day has its own top referrer.
+
+    Covers: @@COVERS@@
+    """
+    record_clicks(shared, link_code, 1, "https://a.example", count=2)
+    record_clicks(shared, link_code, 1, "https://b.example")
+    record_clicks(shared, link_code, 0, "https://c.example")
+    today = today_of(shared)
+    assert rows_of(export(shared, link_code, 2))[1:] == [
+        [link_code, str(today - timedelta(days=1)), "3", "https://a.example"],
+        [link_code, str(today), "1", "https://c.example"],
+    ]
+
+
+def test_export_uses_crlf_line_ends_and_a_final_newline(shared: SharedApp, link_code: str) -> None:
+    """The body is RFC 4180 CSV: CRLF after every record, including the last.
+
+    Covers: @@COVERS@@
+    """
+    days = window(2)
+    response = export(shared, link_code, days)
+    assert response.status_code == 200
+    assert response.content.count(b"\r\n") == days + 1
+    assert response.content.endswith(b"\r\n")
+    assert response.content.startswith(b"code,date,clicks,top_referrer\r\n")
+
+
+def test_export_matches_the_analytics_endpoint(shared: SharedApp, link_code: str) -> None:
+    """Per-day counts equal the zero-filled series of the JSON analytics endpoint.
+
+    Covers: @@COVERS@@
+    """
+    days = window(7)
+    record_clicks(shared, link_code, 0, "https://a.example", count=2)
+    record_clicks(shared, link_code, days - 1, "https://a.example", count=4)
+    analytics = shared.client.get(
+        f"/api/v1/links/{link_code}/analytics", params={"days": days}, headers=shared.alice
+    ).json()
+    rows = rows_of(export(shared, link_code, days))[1:]
+    assert [(row[1], int(row[2])) for row in rows] == [
+        (day["date"], day["clicks"]) for day in analytics["clicks_by_day"]
+    ]
+    assert sum(int(row[2]) for row in rows) == analytics["total_clicks"] == 6
+
+
+def test_a_link_without_clicks_exports_zero_rows(shared: SharedApp, link_code: str) -> None:
+    """Days without clicks are present, with a zero count and no referrer.
+
+    Covers: @@COVERS@@
+    """
+    days = window(4)
+    rows = rows_of(export(shared, link_code, days))
+    assert len(rows) == days + 1
+    assert all(row[0] == link_code and row[2:] == ["0", ""] for row in rows[1:])
+
+
+def test_the_default_window_applies_when_days_is_omitted(shared: SharedApp, link_code: str) -> None:
+    """Without ``days`` the documented default window is exported.
+
+    Covers: @@COVERS@@
+    """
+    rows = rows_of(export(shared, link_code))
+    assert len(rows) == analytics_service.EXPORT_DEFAULT_DAYS + 1
+
+
+def test_recorded_redirects_appear_in_the_export(shared: SharedApp, link_code: str) -> None:
+    """A real redirect with a Referer header shows up as a click from the referrer origin.
+
+    Covers: @@COVERS@@
+    """
+    redirect = shared.client.get(
+        f"/{link_code}", headers={"Referer": "https://news.example.org/story?id=7"}
+    )
+    assert redirect.status_code == 302
+    assert shared.services.recorder.flush(timeout=5)
+    last = rows_of(export(shared, link_code, 1))[-1]
+    assert last[2:] == ["1", "https://news.example.org"]
+
+
+def test_the_attachment_filename_is_sanitised(shared: SharedApp, link_code: str) -> None:
+    """The Content-Disposition header carries a fixed-pattern, header-safe file name.
+
+    Covers: @@COVERS@@
+    """
+    days = window(5)
+    response = export(shared, link_code, days)
+    assert response.headers["content-disposition"] == (
+        f'attachment; filename="clicks-{link_code}-{days}d.csv"'
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        '../../etc/passwd"; x=',
+        'a"\r\nSet-Cookie: session=1',
+        "caf\u00e9 \u202egnp.csv",
+        "..\\..\\windows\\system32",
+        "-rf",
+        "",
+        "x" * 5000,
+    ],
+)
+def test_hostile_file_names_are_reduced_to_a_safe_alphabet(name: str) -> None:
+    """No quote, separator, control or non-ASCII character survives in a download name.
+
+    Covers: @@COVERS@@
+    """
+    safe = csv_export.safe_filename(name)
+    assert safe
+    assert len(safe) <= csv_export.MAX_FILENAME_CHARS
+    assert all(char.isascii() and (char.isalnum() or char in "._-") for char in safe)
+    assert not safe.startswith((".", "-", "_"))
+    header = csv_export.CsvDownload(filename=name, body="").content_disposition
+    assert header == f'attachment; filename="{safe}"'

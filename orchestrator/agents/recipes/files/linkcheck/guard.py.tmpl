@@ -1,0 +1,170 @@
+"""Destination safety policy (SSRF guard): decides whether a URL may be contacted at all.
+
+``UrlGuard.inspect`` applies, in order:
+
+1. syntax: a ``str`` of at most ``MAX_URL_CHARS`` without whitespace, control or backslash chars;
+2. scheme allow-list: ``http`` and ``https`` only; no credentials (userinfo) in the URL;
+3. host: an IP literal in ANY spelling (dotted, decimal, hex, octal, short forms, IPv6,
+   IPv4-mapped IPv6) is judged directly; a name is resolved through the injected ``Resolver``
+   and EVERY answer must be public, so a single private record blocks the whole host;
+4. only globally routable unicast addresses pass: loopback, private, link-local, shared (CGNAT),
+   reserved, multicast and unspecified ranges are refused (so are NAT64, 6to4 and Teredo).
+
+``Target.addresses`` are what the fetcher connects to (DNS pinning): the name is never resolved
+a second time, so DNS rebinding between check and connection is impossible. This module never
+imports ``socket``: name resolution is injected.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import re
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from urllib.parse import quote, urlsplit
+
+from linkcheck.model import ResolutionError
+
+Resolver = Callable[[str], Sequence[str]]
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+MAX_URL_CHARS = 2048
+MAX_ADDRESSES = 16
+DEFAULT_PORTS = {"http": 80, "https": 443}
+_FORBIDDEN = re.compile(r"[\s\x00-\x1f\x7f\\]")
+_HOSTNAME = re.compile(r"[a-z0-9_-]+(?:\.[a-z0-9_-]+)*")
+_NUMERIC_LABEL = re.compile(r"0[xX][0-9a-fA-F]*|[0-9]+")
+_QUOTE_SAFE = "/%:@!$&'()*+,;=~-._?"
+
+
+class Blocked(Exception):
+    """The destination is refused; ``reason`` is a short stable code."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class Target:
+    """A destination that passed the policy."""
+
+    url: str  # normalised, without fragment
+    scheme: str
+    host: str  # lower-case ASCII name or literal IP address (no brackets)
+    port: int
+    path: str  # request target: percent-encoded path plus query
+    addresses: tuple[str, ...]  # the only addresses a fetcher may connect to
+
+
+def _is_public(ip: IPAddress) -> bool:
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return _is_public(ip.ipv4_mapped)
+        if ip.is_site_local or ip.sixtofour is not None or ip.teredo is not None:
+            return False  # tunnelled addresses hide an IPv4 address that cannot be vetted
+    return ip.is_global and not (
+        ip.is_multicast
+        or ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _number(part: str) -> int:
+    """One inet_aton component: ``0x...`` is hex, a leading ``0`` is octal, else decimal."""
+    if part[:2] in ("0x", "0X"):
+        return int(part, 16)
+    return int(part, 8 if part[0] == "0" else 10)
+
+
+def _legacy_ipv4(labels: list[str]) -> ipaddress.IPv4Address:
+    """inet_aton rules: 1-4 numeric parts, the last one fills the remaining bytes."""
+    if not all(_NUMERIC_LABEL.fullmatch(p) for p in labels):
+        raise Blocked("invalid_host")
+    try:
+        *head, last = [_number(p) for p in labels]
+    except ValueError:
+        raise Blocked("invalid_host") from None
+    if len(labels) > 4 or any(v > 255 for v in head) or last >= 256 ** (5 - len(labels)):
+        raise Blocked("invalid_host")
+    return ipaddress.IPv4Address(sum(v << (8 * (3 - i)) for i, v in enumerate(head)) + last)
+
+
+def _host_ip(host: str) -> IPAddress | None:
+    """The IP address ``host`` spells in any notation, or ``None`` for a name."""
+    if ":" in host:
+        try:
+            return ipaddress.IPv6Address(host)
+        except ValueError:
+            raise Blocked("invalid_host") from None
+    labels = host.split(".")
+    if _NUMERIC_LABEL.fullmatch(labels[-1]):  # a name never ends in a number: it must be IPv4
+        return _legacy_ipv4(labels)
+    if len(host) > 253 or not _HOSTNAME.fullmatch(host):
+        raise Blocked("invalid_host")
+    return None
+
+
+def _normalise_host(raw: str) -> str:
+    host = raw[:-1] if raw.endswith(".") else raw
+    if not host.isascii():  # IDNA maps look-alikes (full-width digits and dots) to ASCII first
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            raise Blocked("invalid_host") from None
+    if "%" in host:
+        raise Blocked("invalid_host")
+    return host.lower()
+
+
+def _answer(value: str) -> IPAddress:
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        raise Blocked("invalid_address") from None
+
+
+class UrlGuard:
+    """Applies the policy above; ``resolver`` maps a host name to its IP address strings."""
+
+    def __init__(self, resolver: Resolver) -> None:
+        self._resolver = resolver
+
+    def inspect(self, url: str) -> Target:
+        """Return the pinned ``Target`` or raise ``Blocked`` (``ResolutionError`` if DNS fails)."""
+        if not isinstance(url, str) or len(url) > MAX_URL_CHARS or _FORBIDDEN.search(url):
+            raise Blocked("invalid_url")
+        try:
+            parts = urlsplit(url)
+            explicit_port = parts.port
+        except ValueError:
+            raise Blocked("invalid_url") from None
+        if parts.scheme not in DEFAULT_PORTS:
+            raise Blocked("scheme_not_allowed")
+        if "@" in parts.netloc:
+            raise Blocked("credentials_in_url")
+        port = DEFAULT_PORTS[parts.scheme] if explicit_port is None else explicit_port
+        if not 0 < port < 65536:
+            raise Blocked("invalid_url")
+        host = _normalise_host(parts.hostname or "")
+        literal = _host_ip(host)
+        if literal is not None:
+            addresses = [literal]
+        elif host == "localhost" or host.endswith(".localhost"):
+            raise Blocked("private_address")
+        else:
+            addresses = [_answer(a) for a in list(self._resolver(host))[:MAX_ADDRESSES]]
+            if not addresses:
+                raise ResolutionError("no address for host")
+        if not all(_is_public(ip) for ip in addresses):
+            raise Blocked("private_address")
+        path = quote(parts.path or "/", safe=_QUOTE_SAFE)
+        if parts.query:
+            path += "?" + quote(parts.query, safe=_QUOTE_SAFE)
+        shown = f"[{host}]" if ":" in host else host
+        netloc = shown if explicit_port is None else f"{shown}:{port}"
+        pinned = tuple(dict.fromkeys(str(ip) for ip in addresses))
+        return Target(f"{parts.scheme}://{netloc}{path}", parts.scheme, host, port, path, pinned)

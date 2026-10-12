@@ -1,0 +1,38 @@
+"""Tunable behaviour of the checker; the defaults come from the validated requirements."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+DEFAULT_TIMEOUT_SECONDS = @@TIMEOUT_SECONDS@@
+DEFAULT_MAX_RETRIES = @@MAX_RETRIES@@
+DEFAULT_BACKOFF_BASE_SECONDS = @@BACKOFF_BASE_SECONDS@@
+MAX_BACKOFF_SECONDS = 30.0
+
+
+def _check(name: str, value: object, low: float, high: float) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number")
+    if not math.isfinite(value) or not low <= value <= high:
+        raise ValueError(f"{name} must be between {low} and {high}")
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Time budget of one attempt, number of retries and the back-off base (all in seconds)."""
+
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    max_retries: int = DEFAULT_MAX_RETRIES
+    backoff_base_seconds: float = DEFAULT_BACKOFF_BASE_SECONDS
+
+    def __post_init__(self) -> None:
+        _check("timeout_seconds", self.timeout_seconds, 1, 60)
+        _check("max_retries", self.max_retries, 0, 5)
+        _check("backoff_base_seconds", self.backoff_base_seconds, 0, 10)
+        if isinstance(self.max_retries, float):
+            raise ValueError("max_retries must be an integer")
+
+    def backoff_delay(self, retry: int) -> float:
+        """Seconds to wait before retry number ``retry`` (1-based): base, 2*base, 4*base, ..."""
+        return min(MAX_BACKOFF_SECONDS, self.backoff_base_seconds * 2.0 ** min(retry - 1, 16))

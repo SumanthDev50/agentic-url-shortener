@@ -1,0 +1,39 @@
+@router.get(
+    "/{code}/analytics/export.csv",
+    summary="Export daily click counts as CSV",
+    description=(
+        "A CSV attachment with one row per UTC calendar day of the last N days (today "
+        "included, zero-filled): `code`, `date`, `clicks` and the day's most frequent "
+        "referrer. N is at most @@MAX_WINDOW_DAYS@@. Text cells that a spreadsheet could "
+        "read as a formula are prefixed with a single quote. Clicks are recorded "
+        "asynchronously, so very recent clicks may not be visible yet."
+    ),
+    responses={
+        200: {
+            "description": "The CSV attachment.",
+            "content": {"text/csv": {"schema": {"type": "string"}}},
+        },
+        **AUTHENTICATED_ERRORS,
+        **error_responses(404, 422),
+    },
+)
+def export_link_analytics_csv(
+    code: str,
+    principal: Annotated[Principal, Depends(@@AUTH_DEPENDENCY@@)],
+    services: Annotated[Services, Depends(get_services)],
+    days: Annotated[
+        int,
+        Query(
+            ge=EXPORT_MIN_DAYS,
+            le=EXPORT_MAX_DAYS,
+            description="Window length in UTC calendar days, today included.",
+        ),
+    ] = EXPORT_DEFAULT_DAYS,
+) -> Response:
+    link = services.links.get(code, principal.key_id)
+    export = services.analytics.export_daily_csv(link, days)
+    return Response(
+        content=export.body,
+        media_type=export.media_type,
+        headers={"Content-Disposition": export.content_disposition},
+    )

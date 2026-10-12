@@ -1,0 +1,30 @@
+def test_details_and_list_count_the_allowance_down_with_every_redirect(
+    client: TestClient, alice: Headers
+) -> None:
+    """The remaining allowance is exact right after each redirect (no waiting for the writer).
+
+    Covers: @@COVERS@@
+    """
+    code = limited(client, alice, 3)
+    free = create(client, alice).json()["code"]
+    seen = []
+    for _ in range(3):
+        seen.append(details(client, alice, code)["remaining_clicks"])
+        assert client.get(f"/{code}").status_code == 302
+    seen.append(details(client, alice, code)["remaining_clicks"])
+    assert seen == [3, 2, 1, 0]
+    listing = client.get("/api/v1/links", headers=alice).json()["items"]
+    items = {item["code"]: item for item in listing}
+    assert (items[code]["max_clicks"], items[code]["remaining_clicks"]) == (3, 0)
+    assert LIMIT_KEYS.isdisjoint(items[free])
+
+
+def test_remaining_allowance_is_never_negative(clock: FakeClock) -> None:
+    """``Link.remaining_clicks`` is ``None`` without a limit and never drops below zero.
+
+    Covers: @@COVERS@@
+    """
+    link = partial(Link, 1, "abc1234", DESTINATION, clock.now(), None, None, created_by="alice")
+    assert link(click_count=5, max_clicks=2).remaining_clicks == 0
+    assert link(click_count=1, max_clicks=3).remaining_clicks == 2
+    assert link(click_count=9, max_clicks=None).remaining_clicks is None

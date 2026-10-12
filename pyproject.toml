@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-url-shortener"
+version = "0.1.0"
+description = "A URL shortener service plus an agentic, governed SDLC orchestration engine that builds and changes it."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.27",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+agentic = "orchestrator.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["shortener*", "orchestrator*"]
+
+[tool.setuptools.package-data]
+shortener = ["storage/migrations/*.sql"]
+orchestrator = ["**/*.json", "**/*.md", "**/*.sql", "**/*.txt", "**/*.tmpl"]
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "slow: end-to-end tests that spawn sandboxed subprocesses (deselect with -m 'not slow')",
+]
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
+
+# ---------------------------------------------------------------- coverage
+[tool.coverage.run]
+source = ["shortener", "orchestrator"]
+branch = true
+omit = ["*/recipes/files/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+    "\\.\\.\\.$",
+]
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", ".agentic", "docs/sample-runs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "C4", "SIM", "RUF"]
+ignore = [
+    "S101",   # assert is fine in tests and invariants
+    "S311",   # random is used only for non-security jitter; secrets is used for codes
+    "RUF012", # mutable class attrs are intentional in a few registries
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108", "S603", "S607"]
+"orchestrator/tools/**" = ["S603", "S607"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["shortener", "orchestrator"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_incomplete_defs = true
+exclude = ["^\\.venv/", "^\\.agentic/", "recipes/files/"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false

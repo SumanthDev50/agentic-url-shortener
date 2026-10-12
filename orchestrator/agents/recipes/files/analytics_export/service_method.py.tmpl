@@ -1,0 +1,25 @@
+    def export_daily_csv(self, link: Link, days: int = EXPORT_DEFAULT_DAYS) -> CsvDownload:
+        """Daily click counts of the last ``days`` UTC calendar days (today included) as CSV.
+
+        One zero-filled row per day with the day's most frequent referrer.  Text cells are
+        neutralised against spreadsheet formula injection (see ``csv_export``).
+        """
+        if (
+            isinstance(days, bool)
+            or not isinstance(days, int)
+            or not EXPORT_MIN_DAYS <= days <= EXPORT_MAX_DAYS
+        ):
+            raise InvalidInputError(
+                f"days must be between {EXPORT_MIN_DAYS} and {EXPORT_MAX_DAYS}."
+            )
+        first_day = self._clock.now().date() - timedelta(days=days - 1)
+        since = datetime.combine(first_day, time.min, tzinfo=UTC)
+        referrers = self._clicks.daily_top_referrers(link.id, since)
+        rows = [
+            DailyRow(day=entry.day, clicks=entry.clicks, top_referrer=referrers.get(entry.day))
+            for entry in _zero_filled(first_day, days, self._clicks.daily_counts(link.id, since))
+        ]
+        return CsvDownload(
+            filename=export_filename(link.code, days), body=render_daily_csv(link.code, rows)
+        )
+

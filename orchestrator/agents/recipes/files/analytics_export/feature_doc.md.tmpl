@@ -1,0 +1,67 @@
+# Analytics export: daily click counts as CSV
+
+Marketing can download the daily click counts of a short link as a CSV file and open it in a
+spreadsheet. The change is additive: one new route, no migration, no change to existing responses.
+
+## Endpoint
+
+`GET /api/v1/links/{code}/analytics/export.csv?days=N`
+
+| Item | Behaviour |
+|---|---|
+| Authentication | `X-API-Key` header, exactly like the other `/api/v1/links` routes. Missing or wrong keys get `401`. |
+| Ownership | Only the key that created the link can export it. A foreign or unknown code answers `404` (never `403`). |
+| `days` | Window length in UTC calendar days, today included. Integer from 1 to @@MAX_WINDOW_DAYS@@ (default @@DEFAULT_WINDOW_DAYS@@). Anything else is refused with `422` and nothing is exported. |
+| Response | `200`, `Content-Type: text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="clicks-<code>-<days>d.csv"`, RFC 4180 CRLF line ends. |
+
+The first row is the header `code,date,clicks,top_referrer`. After it comes one row per day of
+the window, oldest first, zero-filled: `code` is the link code, `date` the UTC day (ISO 8601),
+`clicks` the number of recorded clicks and `top_referrer` the most frequent referrer origin
+(`scheme://host`, empty when none; ties are broken alphabetically).
+
+## Behaviour to know
+
+* Clicks are recorded asynchronously (see the product notes), so very recent clicks may not be
+  visible yet, and click events older than `SHORTENER_CLICK_RETENTION_DAYS` (default 90) have been
+  purged: a window longer than the retention period shows zero for the purged days.
+* The export window is independent of the JSON analytics window (365 days at most).
+* The response is built in memory. Its size is bounded by the window (at most @@MAX_WINDOW_DAYS@@ rows)
+  and by a per-cell length cap.
+* Only the referrer origin is ever stored, so the export contains no IP address, user agent or
+  referrer path.
+
+## Security
+
+* **Formula injection.** A text cell that a spreadsheet could evaluate is prefixed with a single
+  quote: cells starting with `=`, `+`, `-`, `@`, a tab or a carriage return, also after leading
+  spaces or invisible characters and for full-width look-alikes. The referrer cell and the link
+  code both go through `neutralize_cell` (`shortener/services/csv_export.py`), even though the
+  referrer is already reduced to an origin on ingestion: the export does not trust stored data.
+  Consumers that parse the CSV by machine must strip a leading quote.
+* **Quoting.** Commas, quotes and line breaks inside a value stay inside one quoted cell; a value
+  can never add a cell or a row.
+* **File name.** The download name is built from the link code with every character outside
+  `A-Z a-z 0-9 . _ -` replaced, so it cannot inject header content or a path.
+* **Window bounds** are validated at the route and again in the service.
+
+## Performance
+
+The target is a p95 of @@PERF_BUDGET_MS@@ ms. The export runs three small indexed queries
+(link lookup, daily counts, daily top referrers) and renders at most @@MAX_WINDOW_DAYS@@ rows.
+`tests/shortener/test_export_perf.py` seeds a full window and asserts an in-process p95 within
+@@IN_PROCESS_BUDGET_MS@@ ms; that generous budget catches algorithmic regressions, not machine noise. Confirm the
+production target with a load test of the deployed service.
+@@DESIGN_SECTION@@@@TRACEABILITY_SECTION@@
+## Limitations
+
+* Buffered, not streamed: very large windows would need a streaming response.
+* The top referrer is per day, not a full breakdown; the JSON analytics endpoint has the
+  window-level top referrers, browsers and devices.
+* Spreadsheets show the neutralising quote as part of the cell text.
+
+## Rollback
+
+Revert the release patch: it removes the route, the export use case and constants in
+`shortener/services/analytics_service.py`, the `daily_top_referrers` query in
+`shortener/storage/click_repository.py` and `shortener/services/csv_export.py`. No data or
+schema changes are involved, so nothing has to be undone in the database.

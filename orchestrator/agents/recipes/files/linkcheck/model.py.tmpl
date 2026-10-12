@@ -1,0 +1,115 @@
+"""Shared types of the linkcheck package: classifications, results and the Fetcher contract.
+
+Plain data and Protocols only: nothing in this module touches the network.
+"""
+
+from __future__ import annotations
+
+import enum
+from dataclasses import asdict, dataclass
+from typing import Protocol
+
+MAX_DISPLAY_CHARS = 200
+
+
+class Classification(enum.StrEnum):
+    """The only outcomes a check can have."""
+
+    HEALTHY = "healthy"  # 2xx
+    REDIRECTING = "redirecting"  # 3xx: reported, never followed
+    CLIENT_ERROR = "client_error"  # 4xx, or a host name that does not resolve
+    SERVER_ERROR = "server_error"  # 5xx, or a transport failure
+    TIMEOUT = "timeout"  # the time budget of an attempt ran out
+    BLOCKED = "blocked"  # refused by the safety policy: never contacted
+
+
+# A redirecting destination still answers: it is counted but not listed as unhealthy.
+UNHEALTHY = frozenset(
+    c for c in Classification if c not in (Classification.HEALTHY, Classification.REDIRECTING)
+)
+# Only timeouts and 5xx responses are worth another attempt.
+TRANSIENT = frozenset({Classification.SERVER_ERROR, Classification.TIMEOUT})
+
+
+def display_text(value: object, limit: int = MAX_DISPLAY_CHARS) -> str:
+    """Single-line, printable, length-capped rendering of untrusted text (URLs, reasons).
+
+    Control, bidirectional and other non-printable characters become ``?`` so a hostile URL or
+    response header can neither forge report lines nor smuggle terminal escape sequences.
+    """
+    text = value if isinstance(value, str) else repr(value)
+    cleaned = "".join(ch if ch.isprintable() else "?" for ch in text[: limit + 1])
+    return cleaned[: limit - 3] + "..." if len(text) > limit else cleaned
+
+
+@dataclass(frozen=True)
+class FetchRequest:
+    """One attempt, built by the checker from a URL that passed the guard."""
+
+    url: str  # normalised, without fragment
+    scheme: str  # "http" or "https"
+    host: str  # ASCII name or literal IP address (no brackets)
+    port: int
+    target: str  # request target: percent-encoded path plus query
+    addresses: tuple[str, ...]  # validated public addresses: connect to these and nothing else
+    timeout_seconds: float  # total budget of this attempt
+
+
+@dataclass(frozen=True)
+class FetchResponse:
+    """The part of an HTTP response the checker needs."""
+
+    status: int
+    location: str | None = None
+
+
+class FetchError(Exception):
+    """A transport failure other than a timeout; ``reason`` is a short stable code."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class FetchTimeout(FetchError):
+    """The attempt did not finish within its time budget."""
+
+    def __init__(self) -> None:
+        super().__init__("timeout")
+
+
+class ResolutionError(Exception):
+    """A host name could not be resolved."""
+
+
+class ResolutionTimeout(ResolutionError):
+    """Name resolution did not finish within the time budget."""
+
+
+class Fetcher(Protocol):
+    """Performs ONE attempt and never follows redirects.
+
+    Raise ``FetchTimeout`` when the time budget is exhausted and ``FetchError`` for any other
+    transport failure; anything else is a bug in the fetcher and propagates to the caller.
+    """
+
+    def fetch(self, request: FetchRequest) -> FetchResponse: ...
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    """Outcome of checking one destination."""
+
+    url: str  # as submitted, rendered through ``display_text``
+    classification: Classification
+    status_code: int | None
+    attempts: int  # passes through the check loop (a blocked destination is judged once)
+    reason: str  # short stable code: "ok", "redirect", "http_404", "private_address", ...
+    location: str | None = None  # redirect target: reported, never followed
+
+    @property
+    def unhealthy(self) -> bool:
+        return self.classification in UNHEALTHY
+
+    def to_dict(self) -> dict[str, object]:
+        return {**asdict(self), "classification": self.classification.value}

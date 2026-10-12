@@ -1,0 +1,20 @@
+@@# Anchored edits of shortener/api/routes_links.py (domain-api group). Route decorators and
+@@# handler signatures are deliberately left alone: the change policy (CHG-004) treats a changed
+@@# route signature as an API change that needs an OpenAPI diff.
+
+@@@ edit create-call
+@@@ anchor
+            ttl_seconds=body.ttl_seconds,
+        )
+@@@ replace
+            ttl_seconds=body.ttl_seconds,
+            max_clicks=body.max_clicks,
+        )
+@@@ end
+
+@@@ edit idempotency-fingerprint
+@@@ anchor
+        request_hash=request_fingerprint(body.model_dump(mode="json")),
+@@@ replace
+        request_hash=request_fingerprint(body.fingerprint_payload()),
+@@@ end

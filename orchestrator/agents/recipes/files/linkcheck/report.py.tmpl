@@ -1,0 +1,43 @@
+"""Summary report: the number of links per classification and the list of unhealthy links."""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass
+
+from linkcheck.model import CheckResult, Classification, display_text
+
+
+@dataclass(frozen=True)
+class Report:
+    """One count per classification (zero included) and the unhealthy results in input order."""
+
+    total: int
+    counts: dict[str, int]
+    unhealthy: tuple[CheckResult, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "total": self.total,
+            "counts": dict(self.counts),
+            "unhealthy": [r.to_dict() for r in self.unhealthy],
+        }
+
+    def render(self) -> str:
+        """Plain text; every untrusted string is sanitised so output lines cannot be forged."""
+        lines = [f"Link health report: {self.total} link(s)"]
+        lines += [f"  {name:<13}{count}" for name, count in self.counts.items()]
+        lines.append(f"Unhealthy links: {len(self.unhealthy)}")
+        for r in self.unhealthy:
+            reason = display_text(r.reason, 60)
+            lines.append(f"  [{r.classification.value}] {display_text(r.url)} ({reason})")
+        return "\n".join(lines) + "\n"
+
+
+def summarize(results: Iterable[CheckResult]) -> Report:
+    """Count ``results`` per classification and collect the unhealthy ones."""
+    items = list(results)
+    counts = {c.value: 0 for c in Classification}
+    for item in items:
+        counts[item.classification.value] += 1
+    return Report(len(items), counts, tuple(item for item in items if item.unhealthy))

@@ -1,0 +1,121 @@
+"""Tests for linkcheck.guard: the URL safety policy (no network, no DNS lookups)."""
+
+from __future__ import annotations
+
+@@IMPORTS@@
+
+
+def no_dns(host):
+    raise AssertionError(f"unexpected DNS lookup for {host}")
+
+
+def verdict(url, answers=None):
+    """'allowed', or the reason the guard blocked ``url`` (an unexpected lookup fails the test)."""
+    resolver = no_dns if answers is None else (lambda host: answers[host])
+    try:
+        UrlGuard(resolver).inspect(url)
+    except Blocked as exc:
+        return exc.reason
+    return "allowed"
+
+
+# @@ASPECT ssrf-block@@
+def test_non_public_destinations_are_blocked_in_every_spelling():
+    """Loopback, private, link-local, shared, multicast and reserved addresses are never allowed.
+
+    @@COVERS@@
+    """
+    hosts = [
+        "127.0.0.1", "localhost", "LOCALHOST.", "app.localhost", "10.1.2.3", "172.16.0.9",
+        "192.168.0.1", "169.254.169.254", ".".join("0000"), "100.64.0.1", "224.0.0.1",
+        "255.255.255.255", "2130706433", "0x7f000001", "0x7f.0.0.1", "0177.0.0.1", "127.1",
+        "017700000001",
+        "[::1]", "[fe80::1]", "[fc00::1]", "[fec0::1]", "[::ffff:127.0.0.1]", "[::ffff:7f00:1]",
+        "[64:ff9b::7f00:1]", "[2002:7f00:1::]", "[2001::1]",
+    ]  # fmt: skip
+    for host in hosts:
+        assert verdict(f"http://{host}/") == "private_address", host
+    for host in ("1.2.3.4.5", "256.1.1.1", "08.1.1.1", "0x"):
+        assert verdict(f"http://{host}/") == "invalid_host", host
+
+
+def test_names_are_resolved_and_every_answer_must_be_public():
+    """A host name is judged by all of its DNS answers: one private answer blocks it.
+
+    @@COVERS@@
+    """
+    answers = {
+        "internal.example": ["10.1.2.3"],
+        "mixed.example": ["93.184.216.34", "127.0.0.1"],
+        "mapped.example": ["::ffff:10.0.0.1"],
+        "garbage.example": ["not-an-address"],
+        "public.example": ["93.184.216.34", "2606:4700:4700::1111"],
+    }
+    expected = {
+        "internal.example": "private_address",
+        "mixed.example": "private_address",
+        "mapped.example": "private_address",
+        "garbage.example": "invalid_address",
+        "public.example": "allowed",
+    }
+    for host, reason in expected.items():
+        assert verdict(f"https://{host}/", answers) == reason, host
+
+
+def test_an_allowed_destination_is_normalised_and_its_addresses_are_pinned():
+    """The fetcher may connect to the validated addresses only (no second DNS lookup).
+
+    @@COVERS@@
+    """
+    guard = UrlGuard(lambda host: ["93.184.216.34", "93.184.216.34"])
+    target = guard.inspect("HTTPS://Example.org:8443/caf\u00e9/%41?q=1#frag")
+    assert (target.scheme, target.host, target.port) == ("https", "example.org", 8443)
+    assert (target.path, target.addresses) == ("/caf%C3%A9/%41?q=1", ("93.184.216.34",))
+    literal = UrlGuard(no_dns).inspect("http://[2606:4700:4700::1111]")
+    assert (literal.host, literal.port, literal.path) == ("2606:4700:4700::1111", 80, "/")
+
+
+# @@ASPECT scheme-allowlist@@
+def test_only_http_and_https_are_accepted():
+    """Any other scheme is blocked before a DNS lookup or a connection is attempted.
+
+    @@COVERS@@
+    """
+    others = [
+        "ftp://example.org/", "file:///etc/hosts", "gopher://example.org/", "javascript:alert(1)",
+        "data:text/plain,x", "ws://example.org/", "//example.org/", "example.org", "",
+    ]  # fmt: skip
+    for url in others:
+        assert verdict(url) == "scheme_not_allowed", url
+    answers = {"example.org": ["93.184.216.34"]}
+    for url in ("HTTP://example.org/", "https://example.org/"):
+        assert verdict(url, answers) == "allowed", url
+
+
+def test_malformed_and_credentialed_urls_are_blocked():
+    """Parser tricks never reach DNS: credentials, whitespace, backslashes, odd ports, encodings.
+
+    @@COVERS@@
+    """
+    login = "http://" + "bob" + ":" + "hunter2x" + "@example.org/"
+    cases = {
+        login: "credentials_in_url",
+        "http://example.org\\@127.0.0.1/": "invalid_url",
+        "http://exa mple.org/": "invalid_url",
+        "http://example.org/\r\nHost: evil": "invalid_url",
+        "http://example.org:0/": "invalid_url",
+        "http://example.org:99999/": "invalid_url",
+        "http://example.org:80x/": "invalid_url",
+        "http://[::1/": "invalid_url",
+        "http://" + "a" * 3000: "invalid_url",
+        "http://%31%32%37.0.0.1/": "invalid_host",
+        "http://[::1%25eth0]/": "invalid_host",
+        "http:///path": "invalid_host",
+        "http://bad!name.example/": "invalid_host",
+        None: "invalid_url",
+        42: "invalid_url",
+        b"http://example.org/": "invalid_url",
+        "http://\uff11\uff12\uff17\uff0e\uff10\uff0e\uff10\uff0e\uff11/": "private_address",
+    }
+    for url, reason in cases.items():
+        assert verdict(url) == reason, url

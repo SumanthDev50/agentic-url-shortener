@@ -1,0 +1,13 @@
+    def daily_top_referrers(self, link_id: int, since: datetime) -> dict[date, str]:
+        cursor = self._database.connection().execute(
+            "SELECT substr(clicked_at, 1, 10) AS day, referrer_host AS name, "
+            "COUNT(*) AS clicks FROM clicks "
+            "WHERE link_id = ? AND clicked_at >= ? AND referrer_host IS NOT NULL "
+            "GROUP BY day, referrer_host ORDER BY day ASC, clicks DESC, name ASC",
+            (link_id, format_utc(since)),
+        )
+        top: dict[date, str] = {}
+        for row in cursor:  # ordered by day, most frequent first: the first row of a day wins
+            top.setdefault(date.fromisoformat(row["day"]), str(row["name"]))
+        return top
+

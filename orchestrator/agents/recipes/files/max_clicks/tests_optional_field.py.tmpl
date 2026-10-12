@@ -1,0 +1,24 @@
+def test_create_with_max_clicks_returns_limit_and_full_allowance(
+    client: TestClient, alice: Headers
+) -> None:
+    """Creating a link with ``max_clicks`` returns the limit and the untouched allowance.
+
+    Covers: @@COVERS@@
+    """
+    response = create(client, alice, max_clicks=3, alias="promo-limit", ttl_seconds=3600)
+    assert response.status_code == 201
+    body = response.json()
+    assert (body["max_clicks"], body["remaining_clicks"], body["click_count"]) == (3, 3, 0)
+    assert (body["code"], body["status"]) == ("promo-limit", "active")
+
+
+def test_explicit_null_max_clicks_creates_an_unlimited_link(
+    client: TestClient, alice: Headers
+) -> None:
+    """``max_clicks: null`` is accepted and behaves like omitting the field.
+
+    Covers: @@COVERS@@
+    """
+    response = create(client, alice, max_clicks=None)
+    assert response.status_code == 201
+    assert LIMIT_KEYS.isdisjoint(response.json())

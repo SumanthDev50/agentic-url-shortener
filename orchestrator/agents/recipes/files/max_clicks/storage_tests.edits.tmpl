@@ -1,0 +1,32 @@
+@@# Anchored edits of tests/shortener/test_shortener_storage.py (storage group).
+@@# Three existing tests pin the list of packaged migrations; adding a migration changes it.
+@@# OLD_* holes are derived from the baseline's own migration files, so a baseline that no
+@@# longer matches the recipe's expectation fails with RecipeAnchorError.
+
+@@@ edit packaged-migration-versions
+@@@ anchor
+    assert [m.version for m in migrations] == @@OLD_VERSIONS@@
+@@@ replace
+    assert [m.version for m in migrations] == @@NEW_VERSIONS@@
+@@@ end
+
+@@@ edit packaged-migration-names
+@@@ anchor
+    assert [m.name for m in migrations] == @@OLD_NAMES@@
+@@@ replace
+    assert [m.name for m in migrations] == @@NEW_NAMES@@
+@@@ end
+
+@@@ edit migrate-applies-everything-once
+@@@ anchor
+    assert migrate(database) == @@OLD_VERSIONS@@
+@@@ replace
+    assert migrate(database) == @@NEW_VERSIONS@@
+@@@ end
+
+@@@ edit concurrent-migrators
+@@@ anchor
+    assert sorted(version for batch in applied for version in batch) == @@OLD_VERSIONS@@
+@@@ replace
+    assert sorted(version for batch in applied for version in batch) == @@NEW_VERSIONS@@
+@@@ end

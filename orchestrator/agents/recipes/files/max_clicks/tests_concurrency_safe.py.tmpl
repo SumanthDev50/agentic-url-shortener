@@ -1,0 +1,72 @@
+def test_parallel_redirects_never_exceed_the_limit(
+    client: TestClient, app: FastAPI, alice: Headers
+) -> None:
+    """N+k parallel requests to a link with ``max_clicks`` of N give exactly N redirects and k 410s.
+
+    Covers: @@COVERS@@
+    """
+    allowed, extra = 5, 7
+    code = limited(client, alice, allowed)
+
+    def follow(_: int) -> int:
+        return int(api_client(app).get(f"/{code}").status_code)
+
+    statuses = run_concurrently(allowed + extra, follow)
+    assert sorted(statuses) == [302] * allowed + [410] * extra
+    shown = details(client, alice, code)
+    assert (shown["click_count"], shown["remaining_clicks"], shown["status"]) == (
+        allowed,
+        0,
+        "exhausted",
+    )
+
+
+def test_single_use_link_never_redirects_twice_under_a_race(
+    client: TestClient, app: FastAPI, alice: Headers
+) -> None:
+    """Sixteen simultaneous requests to a link with ``max_clicks`` of 1 give a single redirect.
+
+    Covers: @@COVERS@@
+    """
+    code = limited(client, alice, 1)
+
+    def follow(_: int) -> int:
+        return int(api_client(app).get(f"/{code}").status_code)
+
+    statuses = run_concurrently(16, follow)
+    assert statuses.count(302) == 1
+    assert statuses.count(410) == 15
+
+
+def test_repository_consume_click_is_atomic_across_threads(
+    migrated_database: Database, clock: FakeClock
+) -> None:
+    """Of twelve threads consuming from an allowance of four, exactly four succeed.
+
+    Covers: @@COVERS@@
+    """
+    repository = SqliteLinkRepository(migrated_database)
+    link = repository.insert(NewLink("race-code", DESTINATION, clock.now(), None, "alice", 4))
+    results = run_concurrently(12, lambda _: repository.consume_click(link.code))
+    assert (results.count(True), results.count(False)) == (4, 8)
+    stored = repository.get_by_code(link.code)
+    assert stored is not None and stored.click_count == 4
+
+
+def test_limit_holds_across_application_instances(
+    client: TestClient, app: FastAPI, settings: Settings, clock: FakeClock, alice: Headers
+) -> None:
+    """Two instances on one database share the limit: it lives in the database, not in memory.
+
+    Covers: @@COVERS@@
+    """
+    other = build_app(settings, clock=clock)
+    code = limited(client, alice, 4)
+    with api_client(other):
+
+        def follow(index: int) -> int:
+            return int(api_client(app if index % 2 == 0 else other).get(f"/{code}").status_code)
+
+        statuses = run_concurrently(10, follow)
+    assert sorted(statuses) == [302] * 4 + [410] * 6
+    assert details(client, alice, code)["remaining_clicks"] == 0
